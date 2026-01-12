@@ -482,7 +482,7 @@ def _edge_to_edge_points(callout_rect: fitz.Rect, target_rect: fitz.Rect) -> Tup
     elif callout_rect.x0 >= target_rect.x1:
         end = fitz.Point(target_rect.x1, y_on_target)
     else:
-        x_on_target = min(max(cc.x, target_rect.x0 + 1.0), target_rect.x1 - 1.0)
+        x_on_target = min(max(cc.x, target_rect.y0 + 1.0), target_rect.y1 - 1.0)
         if cc.y < tc.y:
             end = fitz.Point(x_on_target, target_rect.y0)
         else:
@@ -747,10 +747,14 @@ def annotate_pdf_bytes(
             if not t:
                 continue
 
-            # If this term is the same as the source URL, only box it on page 1
-            if meta_url and (_looks_like_url(t) or _looks_like_url(meta_url)):
-                if _is_same_urlish(t, meta_url) and page.number != 0:
-                    continue
+            # NEW: Strict URL filter for Quotes. 
+            # If the term looks like a URL, only highlight it if we are on Page 1.
+            if _looks_like_url(t) and page.number != 0:
+                continue
+
+            # If this specific term matches the metadata source URL, restrict to Page 1
+            if meta_url and _is_same_urlish(t, meta_url) and page.number != 0:
+                continue
 
             rects = _search_term(page, t)
             rects = _dedupe_rects(rects, pad=1.0)
@@ -805,10 +809,10 @@ def annotate_pdf_bytes(
         if not needles:
             return
 
-        # URL job? (If it looks like a URL, or matches meta_url url-ish)
+        # NEW: Improved URL detection for Metadata jobs
         is_url_job = bool(val_str and _looks_like_url(val_str)) or (meta_url and val_str and _is_same_urlish(val_str, meta_url))
 
-        # If URL job, only search page 1 for targets (fast + guarantees no later-page boxes)
+        # Force search only on page 1 if it's a URL job
         page_indices = [0] if is_url_job else None
 
         targets_by_page: Dict[int, List[fitz.Rect]] = {}
@@ -837,12 +841,6 @@ def annotate_pdf_bytes(
                 p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_meta_hits += 1
 
-        # EXTRA SAFETY for connector map: keep only page 1 for URL jobs
-        if is_url_job:
-            cleaned_targets_by_page = {0: cleaned_targets_by_page[0]} if 0 in cleaned_targets_by_page else {}
-            if not cleaned_targets_by_page:
-                return
-
         # Placement targets for page-1 callout
         if 0 in cleaned_targets_by_page:
             placement_targets = cleaned_targets_by_page[0]
@@ -854,7 +852,6 @@ def annotate_pdf_bytes(
             page1, placement_targets, occupied_callouts, label
         )
 
-        # Footer no-go shift
         footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
         if footer_no_go.width > 0 and footer_no_go.height > 0 and callout_rect.intersects(footer_no_go):
             shift = (callout_rect.y1 - footer_no_go.y0) + EDGE_PAD
@@ -864,7 +861,6 @@ def annotate_pdf_bytes(
         if not _rect_is_valid(callout_rect):
             return
 
-        # White backing + text
         page1.draw_rect(callout_rect, color=WHITE, fill=WHITE, overlay=True)
 
         final_rect, _ret, _final_fs = _insert_textbox_fit(
@@ -888,7 +884,7 @@ def annotate_pdf_bytes(
             }
         )
 
-    # Metadata callouts (values should already be AI-populated upstream)
+    # Metadata callouts
     _do_job("Original source of publication.", meta.get("source_url"), connect_policy="all")
     _do_job("Venue / distinguished organisation.", meta.get("venue_name"), connect_policy="all")
     _do_job("Ensemble / performing organisation.", meta.get("ensemble_name"), connect_policy="all")
@@ -902,7 +898,7 @@ def annotate_pdf_bytes(
     )
 
     # ------------------------------------------------------------
-    # C) Stars (criteria-specific): box only if 4/5 or 5/5, add callout
+    # C) Stars (criteria-specific)
     # ------------------------------------------------------------
     if criterion_id in _STAR_CRITERIA:
         stars_by_page: Dict[int, List[fitz.Rect]] = {}
@@ -917,7 +913,6 @@ def annotate_pdf_bytes(
                 if rects:
                     stars_by_page.setdefault(p.number, []).extend(rects)
 
-        # Draw star boxes
         for pi, rects in stars_by_page.items():
             p = doc.load_page(pi)
             rects = _dedupe_rects(rects, pad=1.0)
@@ -925,7 +920,6 @@ def annotate_pdf_bytes(
                 p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_quote_hits += 1
 
-        # Add a single callout if any stars found anywhere
         if stars_by_page:
             if 0 in stars_by_page:
                 placement_targets = _dedupe_rects(stars_by_page[0], pad=1.0)
