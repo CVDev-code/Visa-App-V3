@@ -683,6 +683,42 @@ def _place_annotation_in_margin(
 # Main annotation entrypoint
 # ============================================================
 
+def _looks_like_url(s: str) -> bool:
+    s = (s or "").strip().lower()
+    return s.startswith("http://") or s.startswith("https://") or s.startswith("www.")
+
+_STAR_CRITERIA = {"3", "2_past"}  # add "2_future" too if you want this there as well
+
+def _find_high_star_tokens(page: fitz.Page) -> List[str]:
+    """
+    Returns star tokens on this page that represent 4/5 or 5/5.
+    Supports simple Bachtrack-style "****" and common unicode stars.
+    """
+    text = page.get_text("text") or ""
+
+    tokens: List[str] = []
+
+    # Bachtrack PDF often contains "****" on its own line
+    # Match 4 or 5 asterisks as a standalone-ish token.
+    for m in re.finditer(r"(?m)^\s*(\*{4,5})\s*$", text):
+        tokens.append(m.group(1))
+
+    # Common unicode star styles:
+    # "★★★★★" or "★★★★☆" (treat both as 4+)
+    for m in re.finditer(r"[★☆]{5}", text):
+        tok = m.group(0)
+        if tok.count("★") >= 4:
+            tokens.append(tok)
+
+    # De-dupe while preserving order
+    out = []
+    seen = set()
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
 def annotate_pdf_bytes(
     pdf_bytes: bytes,
     quote_terms: List[str],
@@ -699,32 +735,42 @@ def annotate_pdf_bytes(
     total_meta_hits = 0
     occupied_callouts: List[fitz.Rect] = []
 
-    # Track quote hits with page index for multi-page connectors
-    quote_hits_by_page: Dict[int, List[fitz.Rect]] = {}
+    # ------------------------------------------------------------
+    # A) Quote highlights (all pages) with URL special-case
+    # ------------------------------------------------------------
+    meta_url = (meta.get("source_url") or "").strip()
 
-    # A) Quote highlights (all pages) + dedupe per page
-    for page_index in range(doc.page_count):
-        page = doc.load_page(page_index)
-        page_hits: List[fitz.Rect] = []
-
+    for page in doc:
         for term in (quote_terms or []):
-            rects = _search_term(page, term)
-            page_hits.extend(rects)
+            t = (term or "").strip()
+            if not t:
+                continue
 
-        page_hits = _dedupe_rects(page_hits, pad=1.0)
-        if page_hits:
-            quote_hits_by_page[page_index] = page_hits
+            # URL special-case: if term looks like the source URL, only highlight on page 1
+            if meta_url and (
+                t == meta_url
+                or (_looks_like_url(t) and t in meta_url)
+                or (_looks_like_url(meta_url) and meta_url in t)
+            ):
+                if page.number != 0:
+                    continue
 
-        for r in page_hits:
-            page.draw_rect(r, color=RED, width=BOX_WIDTH)
-            total_quote_hits += 1
+            rects = _search_term(page, t)
+            rects = _dedupe_rects(rects, pad=1.0)
 
-    # B) Metadata callouts (page 1) — targets can exist on any page now
-    connectors_to_draw = []  # list of dicts
+            for r in rects:
+                page.draw_rect(r, color=RED, width=BOX_WIDTH)
+                total_quote_hits += 1
+
+    # ------------------------------------------------------------
+    # B) Metadata callouts (placed on page 1) — targets can be on any page
+    # ------------------------------------------------------------
+    connectors_to_draw: List[Dict] = []
 
     def _find_targets_across_doc(needle: str) -> List[Tuple[int, fitz.Rect]]:
         out: List[Tuple[int, fitz.Rect]] = []
-        if not needle.strip():
+        needle = (needle or "").strip()
+        if not needle:
             return out
 
         for pi in range(doc.page_count):
@@ -759,14 +805,14 @@ def annotate_pdf_bytes(
         if not needles:
             return
 
-        # Find targets across ALL pages (then dedupe per page)
+        # Find targets across ALL pages
         targets_by_page: Dict[int, List[fitz.Rect]] = {}
         for needle in needles:
             hits = _find_targets_across_doc(needle)
             for pi, r in hits:
                 targets_by_page.setdefault(pi, []).append(r)
 
-        # Deduplicate per page
+        # Deduplicate per page (prevents nested boxes)
         cleaned_targets_by_page: Dict[int, List[fitz.Rect]] = {}
         for pi, rects in targets_by_page.items():
             deduped = _dedupe_rects(rects, pad=1.0)
@@ -783,8 +829,7 @@ def annotate_pdf_bytes(
                 p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_meta_hits += 1
 
-        # Place the annotation (callout) on page 1
-        # For placement heuristics, we use the union of page-1 targets if any, else union of first found page.
+        # Placement targets for the callout on page 1
         if 0 in cleaned_targets_by_page:
             placement_targets = cleaned_targets_by_page[0]
         else:
@@ -795,6 +840,7 @@ def annotate_pdf_bytes(
             page1, placement_targets, occupied_callouts, label
         )
 
+        # Footer no-go shift (belt & suspenders)
         footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
         if footer_no_go.width > 0 and footer_no_go.height > 0 and callout_rect.intersects(footer_no_go):
             shift = (callout_rect.y1 - footer_no_go.y0) + EDGE_PAD
@@ -820,7 +866,6 @@ def annotate_pdf_bytes(
 
         occupied_callouts.append(final_rect)
 
-        # Store connector instructions to draw after all callouts exist
         connectors_to_draw.append(
             {
                 "final_rect": final_rect,
@@ -829,13 +874,12 @@ def annotate_pdf_bytes(
             }
         )
 
-    # --- Meta labels (now includes ensemble) ---
+    # Your metadata callouts (values must already be populated by AI upstream)
     _do_job("Original source of publication.", meta.get("source_url"), connect_policy="all")
     _do_job("Venue / distinguished organisation.", meta.get("venue_name"), connect_policy="all")
     _do_job("Ensemble / performing organisation.", meta.get("ensemble_name"), connect_policy="all")
     _do_job("Performance date.", meta.get("performance_date"), connect_policy="all")
 
-    # Beneficiary targets (still value-driven)
     _do_job(
         "Beneficiary lead role evidence.",
         meta.get("beneficiary_name"),
@@ -843,15 +887,84 @@ def annotate_pdf_bytes(
         also_try_variants=meta.get("beneficiary_variants") or [],
     )
 
-    # Second pass: draw connectors AFTER all callouts exist
+    # ------------------------------------------------------------
+    # C) Stars (box only if 4/5 or 5/5, criteria-specific)
+    #     IMPORTANT: do NOT use _do_job here. Just box + add a callout if present.
+    # ------------------------------------------------------------
+    if criterion_id in _STAR_CRITERIA:
+        stars_by_page: Dict[int, List[fitz.Rect]] = {}
+
+        for p in doc:
+            for tok in _find_high_star_tokens(p):
+                try:
+                    rects = p.search_for(tok)
+                except Exception:
+                    rects = []
+                rects = _dedupe_rects(rects, pad=1.0)
+                if rects:
+                    stars_by_page.setdefault(p.number, []).extend(rects)
+
+        # Draw star boxes
+        for pi, rects in stars_by_page.items():
+            p = doc.load_page(pi)
+            rects = _dedupe_rects(rects, pad=1.0)
+            for r in rects:
+                p.draw_rect(r, color=RED, width=BOX_WIDTH)
+                total_quote_hits += 1
+
+        # Add a single callout on page 1 if we found any stars anywhere
+        if stars_by_page:
+            # pick placement target: stars on page 1 if present, else first star page
+            if 0 in stars_by_page:
+                placement_targets = stars_by_page[0]
+            else:
+                first_pi = sorted(stars_by_page.keys())[0]
+                placement_targets = stars_by_page[first_pi]
+
+            callout_rect, wrapped_text, fs, _safe = _place_annotation_in_margin(
+                page1, placement_targets, occupied_callouts,
+                "Highly acclaimed review of the distinguished performance."
+            )
+
+            footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
+            if footer_no_go.width > 0 and footer_no_go.height > 0 and callout_rect.intersects(footer_no_go):
+                shift = (callout_rect.y1 - footer_no_go.y0) + EDGE_PAD
+                callout_rect = _shift_rect_up(callout_rect, shift, min_y=EDGE_PAD)
+
+            callout_rect = _ensure_min_size(callout_rect, page1.rect)
+            if _rect_is_valid(callout_rect):
+                page1.draw_rect(callout_rect, color=WHITE, fill=WHITE, overlay=True)
+
+                final_rect, _ret, _final_fs = _insert_textbox_fit(
+                    page1,
+                    callout_rect,
+                    wrapped_text,
+                    fontname=FONTNAME,
+                    fontsize=fs,
+                    color=RED,
+                    align=fitz.TEXT_ALIGN_LEFT,
+                    overlay=True,
+                )
+
+                occupied_callouts.append(final_rect)
+
+                connectors_to_draw.append(
+                    {
+                        "final_rect": final_rect,
+                        "connect_policy": "all",
+                        "targets_by_page": {
+                            pi: _dedupe_rects(rects, pad=1.0) for pi, rects in stars_by_page.items()
+                        },
+                    }
+                )
+
+    # ------------------------------------------------------------
+    # D) Second pass: draw connectors AFTER all callouts exist
+    # ------------------------------------------------------------
     for item in connectors_to_draw:
         final_rect = item["final_rect"]
         targets_by_page = item["targets_by_page"]
         connect_policy = item["connect_policy"]
-
-        # Draw connectors to ALL targets across pages, routed down margins if needed.
-        # NOTE: callout is always on page 0.
-        callout_page_index = 0
 
         for pi, rects in targets_by_page.items():
             if connect_policy == "single" and rects:
@@ -859,12 +972,11 @@ def annotate_pdf_bytes(
 
             for r in rects:
                 if pi == 0:
-                    # Same-page: simple line + arrowhead
                     s, e = _edge_to_edge_points(final_rect, r)
-                    page1.draw_line(s, e, color=RED, width=LINE_WIDTH)
+                    _draw_line(page1, s, e)
                     _draw_arrowhead(page1, s, e)
                 else:
-                    _draw_multipage_connector(doc, callout_page_index, final_rect, pi, r)
+                    _draw_multipage_connector(doc, 0, final_rect, pi, r)
 
     out = io.BytesIO()
     doc.save(out)
