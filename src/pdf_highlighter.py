@@ -423,37 +423,6 @@ def _is_same_urlish(a: str, b: str) -> bool:
         return False
     return na == nb
 
-def _url_variants(url: str) -> List[str]:
-    """
-    Generate common PDF-footer variants of the same URL so search_for can actually find it.
-    """
-    u = (url or "").strip()
-    if not u:
-        return []
-
-    # raw and stripped
-    variants = {u, u.strip(" \t\r\n'\"()[]{}<>.,;")}
-
-    # normalize-ish core (no scheme, no www, no trailing slash)
-    core = _normalize_urlish(u)
-    if core:
-        variants.add(core)
-        variants.add("www." + core)
-        variants.add("http://" + core)
-        variants.add("https://" + core)
-        variants.add("http://www." + core)
-        variants.add("https://www." + core)
-
-        variants.add(core + "/")
-        variants.add("www." + core + "/")
-        variants.add("http://" + core + "/")
-        variants.add("https://" + core + "/")
-        variants.add("http://www." + core + "/")
-        variants.add("https://www." + core + "/")
-
-    # Return longest-first so we preferentially match the full footer string
-    out = sorted(variants, key=lambda s: len(s), reverse=True)
-    return [v for v in out if v]
 
 # ============================================================
 # Arrow drawing (tip ends at end-point)
@@ -492,34 +461,56 @@ def _draw_line(page: fitz.Page, a: fitz.Point, b: fitz.Point):
 # ============================================================
 
 def _edge_to_edge_points(callout_rect: fitz.Rect, target_rect: fitz.Rect) -> Tuple[fitz.Point, fitz.Point]:
-    tc = _center(target_rect)
-    cc = _center(callout_rect)
-
-    cy = cc.y
-    if callout_rect.x1 <= target_rect.x0:
-        start = fitz.Point(callout_rect.x1, cy)
-    elif callout_rect.x0 >= target_rect.x1:
-        start = fitz.Point(callout_rect.x0, cy)
+    """
+    Calculates the shortest line between the callout box and the target box.
+    FIX: Logic simplfied to avoid lines erroneously drawing to page corner (0,0).
+    """
+    # 1. Determine relative position
+    # callout is to the RIGHT of target (target < callout)
+    if callout_rect.x0 >= target_rect.x1:
+        start_x = callout_rect.x0
+        end_x = target_rect.x1
+    # callout is to the LEFT of target (callout < target)
+    elif callout_rect.x1 <= target_rect.x0:
+        start_x = callout_rect.x1
+        end_x = target_rect.x0
     else:
-        if cc.y < tc.y:
-            start = fitz.Point(cc.x, callout_rect.y1)
+        # Overlapping horizontally? Pick centers or nearest edges
+        cc = _center(callout_rect)
+        tc = _center(target_rect)
+        if cc.x > tc.x:
+            start_x = callout_rect.x0
+            end_x = target_rect.x1
         else:
-            start = fitz.Point(cc.x, callout_rect.y0)
+            start_x = callout_rect.x1
+            end_x = target_rect.x0
 
-    y_on_target = min(max(cy, target_rect.y0 + 1.0), target_rect.y1 - 1.0)
+    # 2. Determine Y coordinates (clamp to the overlap of Y ranges)
+    # Find the vertical overlap range
+    overlap_y0 = max(callout_rect.y0, target_rect.y0)
+    overlap_y1 = min(callout_rect.y1, target_rect.y1)
 
-    if callout_rect.x1 <= target_rect.x0:
-        end = fitz.Point(target_rect.x0, y_on_target)
-    elif callout_rect.x0 >= target_rect.x1:
-        end = fitz.Point(target_rect.x1, y_on_target)
+    if overlap_y1 > overlap_y0:
+        # Boxes overlap vertically; draw straight horizontal line in the middle of overlap
+        mid_y = (overlap_y0 + overlap_y1) / 2
+        start_y = mid_y
+        end_y = mid_y
     else:
-        x_on_target = min(max(cc.x, target_rect.y0 + 1.0), target_rect.y1 - 1.0)
-        if cc.y < tc.y:
-            end = fitz.Point(x_on_target, target_rect.y0)
-        else:
-            end = fitz.Point(x_on_target, target_rect.y1)
+        # No vertical overlap; draw from center-y to center-y (or clamp to edges)
+        cc = _center(callout_rect)
+        tc = _center(target_rect)
+        
+        # Clamp start_y to callout vertical range
+        start_y = min(max(tc.y, callout_rect.y0 + 1), callout_rect.y1 - 1)
+        # Clamp end_y to target vertical range
+        end_y = min(max(start_y, target_rect.y0 + 1), target_rect.y1 - 1)
 
-    end = _pull_back_point(start, end, ENDPOINT_PULLBACK)
+    start = fitz.Point(start_x, start_y)
+    end_raw = fitz.Point(end_x, end_y)
+
+    # 3. Apply Pullback from the target (so arrow doesn't bury in the box)
+    end = _pull_back_point(start, end_raw, ENDPOINT_PULLBACK)
+
     return start, end
 
 
@@ -717,27 +708,25 @@ def _place_annotation_in_margin(
 
 
 # ============================================================
-# Stars helper
+# Stars helper - UPDATED REGEX
 # ============================================================
 
-_STAR_CRITERIA = {"3", "2_past"}  # extend as needed
-
+_STAR_CRITERIA = {"3", "2_past", "4_past"}
 
 def _find_high_star_tokens(page: fitz.Page) -> List[str]:
     text = page.get_text("text") or ""
     tokens: List[str] = []
 
-    # "****" or "*****" on its own line
-    for m in re.finditer(r"(?m)^\s*(\*{4,5})\s*$", text):
-        tokens.append(m.group(1))
+    # Improved: Match 4 or 5 asterisks anywhere as a standalone token
+    for m in re.finditer(r"(?<!\*)\*{4,5}(?!\*)", text):
+        tokens.append(m.group(0))
 
-    # "★★★★★" or "★★★★☆" etc -> require >=4 filled stars
+    # Match Unicode stars (4 or 5 filled)
     for m in re.finditer(r"[★☆]{5}", text):
         tok = m.group(0)
         if tok.count("★") >= 4:
             tokens.append(tok)
 
-    # de-dupe preserve order
     out = []
     seen = set()
     for t in tokens:
@@ -762,51 +751,37 @@ def annotate_pdf_bytes(
         return pdf_bytes, {}
 
     page1 = doc.load_page(0)
-
     total_quote_hits = 0
     total_meta_hits = 0
     occupied_callouts: List[fitz.Rect] = []
+    connectors_to_draw: List[Dict[str, Any]] = []
 
-    # ------------------------------------------------------------
-    # A) Quote highlights (all pages) with URL special-case
-    # ------------------------------------------------------------
+    # 1. Highlights for quotes (restricting URLs to Page 1)
     meta_url = (meta.get("source_url") or "").strip()
-
     for page in doc:
         for term in (quote_terms or []):
             t = (term or "").strip()
             if not t:
                 continue
-
-            # NEW: Strict URL filter for Quotes. 
-            # If the term looks like a URL, only highlight it if we are on Page 1.
-            if _looks_like_url(t) and page.number != 0:
-                continue
-
-            # If this specific term matches the metadata source URL, restrict to Page 1
-            if meta_url and _is_same_urlish(t, meta_url) and page.number != 0:
+                
+            # strict url check: if it looks like a URL, only highlight on p1
+            is_url_term = _looks_like_url(t) or (meta_url and _is_same_urlish(t, meta_url))
+            if is_url_term and page.number != 0:
                 continue
 
             rects = _search_term(page, t)
-            rects = _dedupe_rects(rects, pad=1.0)
-
-            for r in rects:
+            for r in _dedupe_rects(rects):
                 page.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_quote_hits += 1
 
-    # ------------------------------------------------------------
-    # B) Metadata callouts (placed on page 1) — targets can be on any page
-    # ------------------------------------------------------------
-    connectors_to_draw: List[Dict[str, Any]] = []
-
+    # 2. Metadata logic
+    # Define a helper to search pages for targets
     def _find_targets_across_doc(needle: str, *, page_indices: Optional[List[int]] = None) -> List[Tuple[int, fitz.Rect]]:
-        out: List[Tuple[int, fitz.Rect]] = []
+        out = []
         needle = (needle or "").strip()
         if not needle:
             return out
-
         indices = page_indices if page_indices is not None else list(range(doc.page_count))
-
         for pi in indices:
             p = doc.load_page(pi)
             try:
@@ -817,228 +792,123 @@ def annotate_pdf_bytes(
                 out.append((pi, r))
         return out
 
-    def _do_job(
-        label: str,
-        value: Optional[str],
-        *,
-        connect_policy: str = "union",  # "single" | "union" | "all"
-        also_try_variants: Optional[List[str]] = None,
-    ):
+    def _do_job(label: str, value: Optional[str], variants: List[str] = None):
         nonlocal total_meta_hits
-
         val_str = str(value or "").strip()
-        needles: List[str] = []
-        if val_str:
-            needles.append(val_str)
-        if also_try_variants:
-            for v in also_try_variants:
-                vv = (v or "").strip()
-                if vv:
-                    needles.append(vv)
-
-        needles = list(dict.fromkeys(needles))
-        if not needles:
-            return
-
-    # URL job?
-    is_url_job = bool(val_str and _looks_like_url(val_str)) or (
-        meta_url and val_str and _is_same_urlish(val_str, meta_url)
-    )
-
-    # If URL job: search only page 1, BUT widen the needles to common footer variants
-    if is_url_job:
-        page_indices = [0]
-        # expand search needles so we actually hit the footer text
-        expanded = []
+        if not val_str: return
+        
+        is_url = _looks_like_url(val_str) or (meta_url and _is_same_urlish(val_str, meta_url))
+        indices = [0] if is_url else None
+        
+        targets_by_page = {}
+        needles = list(dict.fromkeys([val_str] + (variants or [])))
         for n in needles:
-            expanded.extend(_url_variants(n))
-        # also add variants of meta_url itself (sometimes meta_url differs from displayed footer)
-        if meta_url:
-            expanded.extend(_url_variants(meta_url))
-        # de-dupe while preserving order
-        seen = set()
-        needles = [x for x in expanded if not (x in seen or seen.add(x))]
-    else:
-        page_indices = None
-
-        targets_by_page: Dict[int, List[fitz.Rect]] = {}
-        for needle in needles:
-            hits = _find_targets_across_doc(needle, page_indices=page_indices)
-            for pi, r in hits:
+            for pi, r in _find_targets_across_doc(n, page_indices=indices):
                 targets_by_page.setdefault(pi, []).append(r)
 
-        cleaned_targets_by_page: Dict[int, List[fitz.Rect]] = {}
+        if not targets_by_page: return
+
+        # Draw boxes
         for pi, rects in targets_by_page.items():
-            deduped = _dedupe_rects(rects, pad=1.0)
-            if deduped:
-                cleaned_targets_by_page[pi] = deduped
-
-        if not cleaned_targets_by_page:
-            return
-
-        # Draw red boxes on pages where found
-        for pi, rects in cleaned_targets_by_page.items():
-            # EXTRA SAFETY: even if something slipped through, never box URL beyond page 1
-            if is_url_job and pi != 0:
-                continue
+            # Extra safety: never box URLs on other pages
+            if is_url and pi != 0: continue
 
             p = doc.load_page(pi)
-            for r in rects:
+            for r in _dedupe_rects(rects):
                 p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_meta_hits += 1
-
-        # Placement targets for page-1 callout
-        if 0 in cleaned_targets_by_page:
-            placement_targets = cleaned_targets_by_page[0]
+        
+        # If we found targets on page 1, use them for callout. Else pick first avail page.
+        targets_for_callout_map = {}
+        if is_url:
+             if 0 in targets_by_page:
+                 targets_for_callout_map = {0: targets_by_page[0]}
         else:
-            first_pi = sorted(cleaned_targets_by_page.keys())[0]
-            placement_targets = cleaned_targets_by_page[first_pi]
+             targets_for_callout_map = targets_by_page
 
-        callout_rect, wrapped_text, fs, _safe = _place_annotation_in_margin(
-            page1, placement_targets, occupied_callouts, label
-        )
+        if not targets_for_callout_map: return
 
+        # Place Callout on Page 1
+        if 0 in targets_for_callout_map:
+            p_targets = targets_for_callout_map[0]
+        else:
+            first_pi = sorted(targets_for_callout_map.keys())[0]
+            p_targets = targets_for_callout_map[first_pi]
+
+        crect, wtext, fs, _ = _place_annotation_in_margin(page1, p_targets, occupied_callouts, label)
+        
+        # Footer shift
         footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
-        if footer_no_go.width > 0 and footer_no_go.height > 0 and callout_rect.intersects(footer_no_go):
-            shift = (callout_rect.y1 - footer_no_go.y0) + EDGE_PAD
-            callout_rect = _shift_rect_up(callout_rect, shift, min_y=EDGE_PAD)
+        if footer_no_go.width > 0 and footer_no_go.height > 0 and crect.intersects(footer_no_go):
+            shift = (crect.y1 - footer_no_go.y0) + EDGE_PAD
+            crect = _shift_rect_up(crect, shift, min_y=EDGE_PAD)
+        
+        crect = _ensure_min_size(crect, page1.rect)
+        if not _rect_is_valid(crect): return
 
-        callout_rect = _ensure_min_size(callout_rect, page1.rect)
-        if not _rect_is_valid(callout_rect):
-            return
+        # Draw White Box and Text
+        page1.draw_rect(crect, color=WHITE, fill=WHITE, overlay=True)
+        final_r, _, _ = _insert_textbox_fit(page1, crect, wtext, fontname=FONTNAME, fontsize=fs, color=RED)
+        occupied_callouts.append(final_r)
+        
+        # Add to connectors (using the restricted map for URLs)
+        connectors_to_draw.append({"final_rect": final_r, "targets_by_page": targets_for_callout_map})
 
-        page1.draw_rect(callout_rect, color=WHITE, fill=WHITE, overlay=True)
+    # Execute Jobs
+    _do_job("Original source of publication.", meta.get("source_url"))
+    _do_job("Venue is distinguished organization.", meta.get("venue_name"))
+    _do_job("Ensemble is distinguished organization.", meta.get("ensemble_name"))
+    _do_job("Performance date.", meta.get("performance_date"))
+    _do_job("Beneficiary lead role evidence.", meta.get("beneficiary_name"), meta.get("beneficiary_variants"))
 
-        final_rect, _ret, _final_fs = _insert_textbox_fit(
-            page1,
-            callout_rect,
-            wrapped_text,
-            fontname=FONTNAME,
-            fontsize=fs,
-            color=RED,
-            align=fitz.TEXT_ALIGN_LEFT,
-            overlay=True,
-        )
-
-        occupied_callouts.append(final_rect)
-
-        connectors_to_draw.append(
-            {
-                "final_rect": final_rect,
-                "connect_policy": connect_policy,
-                "targets_by_page": cleaned_targets_by_page,
-            }
-        )
-
-    # Metadata callouts
-    _do_job("Original source of publication.", meta.get("source_url"), connect_policy="all")
-    _do_job("Venue / distinguished organisation.", meta.get("venue_name"), connect_policy="all")
-    _do_job("Ensemble / performing organisation.", meta.get("ensemble_name"), connect_policy="all")
-    _do_job("Performance date.", meta.get("performance_date"), connect_policy="all")
-
-    _do_job(
-        "Beneficiary lead role evidence.",
-        meta.get("beneficiary_name"),
-        connect_policy="all",
-        also_try_variants=meta.get("beneficiary_variants") or [],
-    )
-
-    # ------------------------------------------------------------
-    # C) Stars (criteria-specific)
-    # ------------------------------------------------------------
+    # 3. Stars Logic
     if criterion_id in _STAR_CRITERIA:
-        stars_by_page: Dict[int, List[fitz.Rect]] = {}
-
+        stars_map = {}
         for p in doc:
             for tok in _find_high_star_tokens(p):
-                try:
-                    rects = p.search_for(tok)
-                except Exception:
-                    rects = []
-                rects = _dedupe_rects(rects, pad=1.0)
-                if rects:
-                    stars_by_page.setdefault(p.number, []).extend(rects)
+                found = p.search_for(tok)
+                if found:
+                    stars_map.setdefault(p.number, []).extend(found)
+                    for r in _dedupe_rects(found):
+                        p.draw_rect(r, color=RED, width=BOX_WIDTH)
+                        total_quote_hits += 1 # Count stars as quote hits
 
-        for pi, rects in stars_by_page.items():
-            p = doc.load_page(pi)
-            rects = _dedupe_rects(rects, pad=1.0)
-            for r in rects:
-                p.draw_rect(r, color=RED, width=BOX_WIDTH)
-                total_quote_hits += 1
-
-        if stars_by_page:
-            if 0 in stars_by_page:
-                placement_targets = _dedupe_rects(stars_by_page[0], pad=1.0)
+        if stars_map:
+            if 0 in stars_map:
+                p_targets = stars_map[0]
             else:
-                first_pi = sorted(stars_by_page.keys())[0]
-                placement_targets = _dedupe_rects(stars_by_page[first_pi], pad=1.0)
+                first_pi = sorted(stars_map.keys())[0]
+                p_targets = stars_map[first_pi]
 
-            callout_rect, wrapped_text, fs, _safe = _place_annotation_in_margin(
-                page1,
-                placement_targets,
-                occupied_callouts,
-                "Highly acclaimed review of the distinguished performance.",
-            )
-
+            crect, wtext, fs, _ = _place_annotation_in_margin(page1, p_targets, occupied_callouts, "Highly acclaimed review of the distinguished performance.")
+            
+            # Footer shift
             footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
-            if footer_no_go.width > 0 and footer_no_go.height > 0 and callout_rect.intersects(footer_no_go):
-                shift = (callout_rect.y1 - footer_no_go.y0) + EDGE_PAD
-                callout_rect = _shift_rect_up(callout_rect, shift, min_y=EDGE_PAD)
+            if footer_no_go.width > 0 and footer_no_go.height > 0 and crect.intersects(footer_no_go):
+                shift = (crect.y1 - footer_no_go.y0) + EDGE_PAD
+                crect = _shift_rect_up(crect, shift, min_y=EDGE_PAD)
+            
+            crect = _ensure_min_size(crect, page1.rect)
+            if _rect_is_valid(crect):
+                page1.draw_rect(crect, color=WHITE, fill=WHITE, overlay=True)
+                final_r, _, _ = _insert_textbox_fit(page1, crect, wtext, fontname=FONTNAME, fontsize=fs, color=RED)
+                occupied_callouts.append(final_r)
+                connectors_to_draw.append({"final_rect": final_r, "targets_by_page": stars_map})
 
-            callout_rect = _ensure_min_size(callout_rect, page1.rect)
-            if _rect_is_valid(callout_rect):
-                page1.draw_rect(callout_rect, color=WHITE, fill=WHITE, overlay=True)
-
-                final_rect, _ret, _final_fs = _insert_textbox_fit(
-                    page1,
-                    callout_rect,
-                    wrapped_text,
-                    fontname=FONTNAME,
-                    fontsize=fs,
-                    color=RED,
-                    align=fitz.TEXT_ALIGN_LEFT,
-                    overlay=True,
-                )
-
-                occupied_callouts.append(final_rect)
-
-                connectors_to_draw.append(
-                    {
-                        "final_rect": final_rect,
-                        "connect_policy": "all",
-                        "targets_by_page": {
-                            pi: _dedupe_rects(rects, pad=1.0) for pi, rects in stars_by_page.items()
-                        },
-                    }
-                )
-
-    # ------------------------------------------------------------
-    # D) Second pass: draw connectors AFTER all callouts exist
-    # ------------------------------------------------------------
+    # 4. Draw Connectors
     for item in connectors_to_draw:
-        final_rect = item["final_rect"]
-        targets_by_page = item["targets_by_page"]
-        connect_policy = item["connect_policy"]
-
-        for pi, rects in targets_by_page.items():
-            if connect_policy == "single" and rects:
-                rects = rects[:1]
-
-            for r in rects:
+        fr = item["final_rect"]
+        for pi, rects in item["targets_by_page"].items():
+            for r in _dedupe_rects(rects):
                 if pi == 0:
-                    s, e = _edge_to_edge_points(final_rect, r)
+                    s, e = _edge_to_edge_points(fr, r)
                     _draw_line(page1, s, e)
                     _draw_arrowhead(page1, s, e)
                 else:
-                    _draw_multipage_connector(doc, 0, final_rect, pi, r)
+                    _draw_multipage_connector(doc, 0, fr, pi, r)
 
     out = io.BytesIO()
     doc.save(out)
     doc.close()
     out.seek(0)
-
-    return out.getvalue(), {
-        "total_quote_hits": total_quote_hits,
-        "total_meta_hits": total_meta_hits,
-        "criterion_id": criterion_id,
-    }
+    return out.getvalue(), {"total_quote_hits": total_quote_hits, "total_meta_hits": total_meta_hits, "criterion_id": criterion_id}
