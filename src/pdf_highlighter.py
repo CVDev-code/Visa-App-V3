@@ -1,7 +1,7 @@
 import io
 import math
 import re
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 
 import fitz  # PyMuPDF
 
@@ -399,7 +399,33 @@ def _search_term(page: fitz.Page, term: str) -> List[fitz.Rect]:
 
 
 # ============================================================
-# Arrow drawing
+# URL helpers (used to restrict URL boxing to page 1)
+# ============================================================
+
+def _looks_like_url(s: str) -> bool:
+    s = (s or "").strip().lower()
+    return s.startswith("http://") or s.startswith("https://") or s.startswith("www.")
+
+
+def _normalize_urlish(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = s.strip(" \t\r\n'\"()[]{}<>.,;")
+    s = re.sub(r"^https?://", "", s)
+    s = re.sub(r"^www\.", "", s)
+    s = s.rstrip("/")
+    return s
+
+
+def _is_same_urlish(a: str, b: str) -> bool:
+    na = _normalize_urlish(a)
+    nb = _normalize_urlish(b)
+    if not na or not nb:
+        return False
+    return na == nb
+
+
+# ============================================================
+# Arrow drawing (tip ends at end-point)
 # ============================================================
 
 def _draw_arrowhead(page: fitz.Page, start: fitz.Point, end: fitz.Point):
@@ -411,9 +437,11 @@ def _draw_arrowhead(page: fitz.Page, start: fitz.Point, end: fitz.Point):
 
     ux, uy = vx / d, vy / d  # direction
 
+    # base center is behind tip
     bx = end.x - ux * ARROW_LEN
     by = end.y - uy * ARROW_LEN
 
+    # perpendicular
     px = -uy
     py = ux
 
@@ -465,7 +493,7 @@ def _edge_to_edge_points(callout_rect: fitz.Rect, target_rect: fitz.Rect) -> Tup
 
 
 # ============================================================
-# Multi-page routing
+# Multi-page routing: down the page margin(s) until target page
 # ============================================================
 
 def _draw_multipage_connector(
@@ -482,6 +510,7 @@ def _draw_multipage_connector(
     gutter_side = "right" if callout_c.x >= pr.width / 2 else "left"
     gutter_x = pr.width - EDGE_PAD if gutter_side == "right" else EDGE_PAD
 
+    # Page 1: from callout edge -> gutter at same y, then down to bottom
     s, _ = _edge_to_edge_points(callout_rect, target_rect)
 
     y_start = min(max(s.y, EDGE_PAD), pr.height - EDGE_PAD)
@@ -491,12 +520,14 @@ def _draw_multipage_connector(
     _draw_line(callout_page, s, p_gutter_start)
     _draw_line(callout_page, p_gutter_start, p_gutter_bottom)
 
+    # Intermediate pages: vertical gutter line top->bottom
     for pi in range(callout_page_index + 1, target_page_index):
         p = doc.load_page(pi)
         pr_i = p.rect
         gx = pr_i.width - EDGE_PAD if gutter_side == "right" else EDGE_PAD
         _draw_line(p, fitz.Point(gx, EDGE_PAD), fitz.Point(gx, pr_i.height - EDGE_PAD))
 
+    # Target page: gutter top -> target_y, then across to target edge, arrowhead at end
     tp = doc.load_page(target_page_index)
     pr_t = tp.rect
     gx_t = pr_t.width - EDGE_PAD if gutter_side == "right" else EDGE_PAD
@@ -521,7 +552,7 @@ def _draw_multipage_connector(
 
 
 # ============================================================
-# Margin placement (callouts on page 1)
+# Margin placement (first-page callouts)
 # ============================================================
 
 def _place_annotation_in_margin(
@@ -626,6 +657,7 @@ def _place_annotation_in_margin(
         _, cand, wrapped_text, fs, safe = best
         return cand, wrapped_text, fs, safe
 
+    # last resort fallback
     side, x0_lane, x1_lane, lane_w = lanes[0]
     usable_w = min(MAX_CALLOUT_WIDTH, lane_w)
     fs, wrapped_text, w_used, h_needed = _optimize_layout_for_margin(label, usable_w)
@@ -654,64 +686,27 @@ def _place_annotation_in_margin(
 
 
 # ============================================================
-# URL special-case helpers (FIX)
+# Stars helper
 # ============================================================
 
-def _looks_like_url(s: str) -> bool:
-    s = (s or "").strip().lower()
-    return s.startswith("http://") or s.startswith("https://") or s.startswith("www.")
-
-
-def _norm_urlish(s: str) -> str:
-    """
-    Normalise so the same footer URL matches even if:
-      - http vs https
-      - www.
-      - trailing /
-      - querystring (?foo=bar)
-      - fragment (#section)
-    """
-    s = (s or "").strip().lower()
-    if not s:
-        return ""
-    s = s.replace("http://", "").replace("https://", "")
-    if s.startswith("www."):
-        s = s[4:]
-    s = s.split("#", 1)[0]
-    s = s.split("?", 1)[0]
-    s = s.rstrip("/")
-    return s
-
-
-def _is_same_urlish(a: str, b: str) -> bool:
-    na = _norm_urlish(a)
-    nb = _norm_urlish(b)
-    if not na or not nb:
-        return False
-    # either identical or one contains the other (covers minor truncations)
-    return na == nb or na in nb or nb in na
-
-
-# ============================================================
-# Stars (kept as-is)
-# ============================================================
-
-_STAR_CRITERIA = {"3", "2_past"}  # add "2_future" if desired
+_STAR_CRITERIA = {"3", "2_past"}  # extend as needed
 
 
 def _find_high_star_tokens(page: fitz.Page) -> List[str]:
     text = page.get_text("text") or ""
-
     tokens: List[str] = []
 
+    # "****" or "*****" on its own line
     for m in re.finditer(r"(?m)^\s*(\*{4,5})\s*$", text):
         tokens.append(m.group(1))
 
+    # "★★★★★" or "★★★★☆" etc -> require >=4 filled stars
     for m in re.finditer(r"[★☆]{5}", text):
         tok = m.group(0)
         if tok.count("★") >= 4:
             tokens.append(tok)
 
+    # de-dupe preserve order
     out = []
     seen = set()
     for t in tokens:
@@ -742,7 +737,7 @@ def annotate_pdf_bytes(
     occupied_callouts: List[fitz.Rect] = []
 
     # ------------------------------------------------------------
-    # A) Quote highlights (all pages) with URL special-case (FIX)
+    # A) Quote highlights (all pages) with URL special-case
     # ------------------------------------------------------------
     meta_url = (meta.get("source_url") or "").strip()
 
@@ -752,7 +747,7 @@ def annotate_pdf_bytes(
             if not t:
                 continue
 
-            # FIX: if this term matches the meta URL, only highlight on page 1
+            # If this term is the same as the source URL, only box it on page 1
             if meta_url and (_looks_like_url(t) or _looks_like_url(meta_url)):
                 if _is_same_urlish(t, meta_url) and page.number != 0:
                     continue
@@ -767,15 +762,17 @@ def annotate_pdf_bytes(
     # ------------------------------------------------------------
     # B) Metadata callouts (placed on page 1) — targets can be on any page
     # ------------------------------------------------------------
-    connectors_to_draw: List[Dict] = []
+    connectors_to_draw: List[Dict[str, Any]] = []
 
-    def _find_targets_across_doc(needle: str) -> List[Tuple[int, fitz.Rect]]:
+    def _find_targets_across_doc(needle: str, *, page_indices: Optional[List[int]] = None) -> List[Tuple[int, fitz.Rect]]:
         out: List[Tuple[int, fitz.Rect]] = []
         needle = (needle or "").strip()
         if not needle:
             return out
 
-        for pi in range(doc.page_count):
+        indices = page_indices if page_indices is not None else list(range(doc.page_count))
+
+        for pi in indices:
             p = doc.load_page(pi)
             try:
                 rects = p.search_for(needle)
@@ -794,9 +791,10 @@ def annotate_pdf_bytes(
     ):
         nonlocal total_meta_hits
 
+        val_str = str(value or "").strip()
         needles: List[str] = []
-        if value and str(value).strip():
-            needles.append(str(value).strip())
+        if val_str:
+            needles.append(val_str)
         if also_try_variants:
             for v in also_try_variants:
                 vv = (v or "").strip()
@@ -807,9 +805,15 @@ def annotate_pdf_bytes(
         if not needles:
             return
 
+        # URL job? (If it looks like a URL, or matches meta_url url-ish)
+        is_url_job = bool(val_str and _looks_like_url(val_str)) or (meta_url and val_str and _is_same_urlish(val_str, meta_url))
+
+        # If URL job, only search page 1 for targets (fast + guarantees no later-page boxes)
+        page_indices = [0] if is_url_job else None
+
         targets_by_page: Dict[int, List[fitz.Rect]] = {}
         for needle in needles:
-            hits = _find_targets_across_doc(needle)
+            hits = _find_targets_across_doc(needle, page_indices=page_indices)
             for pi, r in hits:
                 targets_by_page.setdefault(pi, []).append(r)
 
@@ -822,12 +826,24 @@ def annotate_pdf_bytes(
         if not cleaned_targets_by_page:
             return
 
+        # Draw red boxes on pages where found
         for pi, rects in cleaned_targets_by_page.items():
+            # EXTRA SAFETY: even if something slipped through, never box URL beyond page 1
+            if is_url_job and pi != 0:
+                continue
+
             p = doc.load_page(pi)
             for r in rects:
                 p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_meta_hits += 1
 
+        # EXTRA SAFETY for connector map: keep only page 1 for URL jobs
+        if is_url_job:
+            cleaned_targets_by_page = {0: cleaned_targets_by_page[0]} if 0 in cleaned_targets_by_page else {}
+            if not cleaned_targets_by_page:
+                return
+
+        # Placement targets for page-1 callout
         if 0 in cleaned_targets_by_page:
             placement_targets = cleaned_targets_by_page[0]
         else:
@@ -838,6 +854,7 @@ def annotate_pdf_bytes(
             page1, placement_targets, occupied_callouts, label
         )
 
+        # Footer no-go shift
         footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
         if footer_no_go.width > 0 and footer_no_go.height > 0 and callout_rect.intersects(footer_no_go):
             shift = (callout_rect.y1 - footer_no_go.y0) + EDGE_PAD
@@ -847,6 +864,7 @@ def annotate_pdf_bytes(
         if not _rect_is_valid(callout_rect):
             return
 
+        # White backing + text
         page1.draw_rect(callout_rect, color=WHITE, fill=WHITE, overlay=True)
 
         final_rect, _ret, _final_fs = _insert_textbox_fit(
@@ -884,7 +902,7 @@ def annotate_pdf_bytes(
     )
 
     # ------------------------------------------------------------
-    # C) Stars (criteria-specific)
+    # C) Stars (criteria-specific): box only if 4/5 or 5/5, add callout
     # ------------------------------------------------------------
     if criterion_id in _STAR_CRITERIA:
         stars_by_page: Dict[int, List[fitz.Rect]] = {}
@@ -899,6 +917,7 @@ def annotate_pdf_bytes(
                 if rects:
                     stars_by_page.setdefault(p.number, []).extend(rects)
 
+        # Draw star boxes
         for pi, rects in stars_by_page.items():
             p = doc.load_page(pi)
             rects = _dedupe_rects(rects, pad=1.0)
@@ -906,16 +925,19 @@ def annotate_pdf_bytes(
                 p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_quote_hits += 1
 
+        # Add a single callout if any stars found anywhere
         if stars_by_page:
             if 0 in stars_by_page:
-                placement_targets = stars_by_page[0]
+                placement_targets = _dedupe_rects(stars_by_page[0], pad=1.0)
             else:
                 first_pi = sorted(stars_by_page.keys())[0]
-                placement_targets = stars_by_page[first_pi]
+                placement_targets = _dedupe_rects(stars_by_page[first_pi], pad=1.0)
 
             callout_rect, wrapped_text, fs, _safe = _place_annotation_in_margin(
-                page1, placement_targets, occupied_callouts,
-                "Highly acclaimed review of the distinguished performance."
+                page1,
+                placement_targets,
+                occupied_callouts,
+                "Highly acclaimed review of the distinguished performance.",
             )
 
             footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
