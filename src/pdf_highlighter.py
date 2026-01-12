@@ -423,6 +423,37 @@ def _is_same_urlish(a: str, b: str) -> bool:
         return False
     return na == nb
 
+def _url_variants(url: str) -> List[str]:
+    """
+    Generate common PDF-footer variants of the same URL so search_for can actually find it.
+    """
+    u = (url or "").strip()
+    if not u:
+        return []
+
+    # raw and stripped
+    variants = {u, u.strip(" \t\r\n'\"()[]{}<>.,;")}
+
+    # normalize-ish core (no scheme, no www, no trailing slash)
+    core = _normalize_urlish(u)
+    if core:
+        variants.add(core)
+        variants.add("www." + core)
+        variants.add("http://" + core)
+        variants.add("https://" + core)
+        variants.add("http://www." + core)
+        variants.add("https://www." + core)
+
+        variants.add(core + "/")
+        variants.add("www." + core + "/")
+        variants.add("http://" + core + "/")
+        variants.add("https://" + core + "/")
+        variants.add("http://www." + core + "/")
+        variants.add("https://www." + core + "/")
+
+    # Return longest-first so we preferentially match the full footer string
+    out = sorted(variants, key=lambda s: len(s), reverse=True)
+    return [v for v in out if v]
 
 # ============================================================
 # Arrow drawing (tip ends at end-point)
@@ -809,11 +840,26 @@ def annotate_pdf_bytes(
         if not needles:
             return
 
-        # NEW: Improved URL detection for Metadata jobs
-        is_url_job = bool(val_str and _looks_like_url(val_str)) or (meta_url and val_str and _is_same_urlish(val_str, meta_url))
+    # URL job?
+    is_url_job = bool(val_str and _looks_like_url(val_str)) or (
+        meta_url and val_str and _is_same_urlish(val_str, meta_url)
+    )
 
-        # Force search only on page 1 if it's a URL job
-        page_indices = [0] if is_url_job else None
+    # If URL job: search only page 1, BUT widen the needles to common footer variants
+    if is_url_job:
+        page_indices = [0]
+        # expand search needles so we actually hit the footer text
+        expanded = []
+        for n in needles:
+            expanded.extend(_url_variants(n))
+        # also add variants of meta_url itself (sometimes meta_url differs from displayed footer)
+        if meta_url:
+            expanded.extend(_url_variants(meta_url))
+        # de-dupe while preserving order
+        seen = set()
+        needles = [x for x in expanded if not (x in seen or seen.add(x))]
+    else:
+        page_indices = None
 
         targets_by_page: Dict[int, List[fitz.Rect]] = {}
         for needle in needles:
