@@ -306,11 +306,6 @@ def _rect_area(r: fitz.Rect) -> float:
 
 
 def _dedupe_rects(rects: List[fitz.Rect], pad: float = 1.0) -> List[fitz.Rect]:
-    """
-    Remove nested duplicates: if one rect is fully contained in a larger rect, keep only the larger.
-    Works well for cases like:
-      "Jasurbek", "Khaydarov", "Jasurbek Khaydarov", "Jasurbek Khaydarov’s Polydorus..."
-    """
     if not rects:
         return []
 
@@ -404,13 +399,10 @@ def _search_term(page: fitz.Page, term: str) -> List[fitz.Rect]:
 
 
 # ============================================================
-# Arrow drawing (tip ends at end-point)
+# Arrow drawing
 # ============================================================
 
 def _draw_arrowhead(page: fitz.Page, start: fitz.Point, end: fitz.Point):
-    """
-    Draw a small filled triangle arrowhead with its TIP exactly at `end`.
-    """
     vx = end.x - start.x
     vy = end.y - start.y
     d = math.hypot(vx, vy)
@@ -419,11 +411,9 @@ def _draw_arrowhead(page: fitz.Page, start: fitz.Point, end: fitz.Point):
 
     ux, uy = vx / d, vy / d  # direction
 
-    # base center is behind tip
     bx = end.x - ux * ARROW_LEN
     by = end.y - uy * ARROW_LEN
 
-    # perpendicular
     px = -uy
     py = ux
 
@@ -475,7 +465,7 @@ def _edge_to_edge_points(callout_rect: fitz.Rect, target_rect: fitz.Rect) -> Tup
 
 
 # ============================================================
-# Multi-page routing: down the page margin(s) until target page
+# Multi-page routing
 # ============================================================
 
 def _draw_multipage_connector(
@@ -485,23 +475,14 @@ def _draw_multipage_connector(
     target_page_index: int,
     target_rect: fitz.Rect,
 ):
-    """
-    Draw:
-      - Page 1 (annotation page): from callout edge -> gutter point, then down to bottom
-      - Intermediate pages: vertical gutter line top->bottom
-      - Target page: gutter line top->target_y, then across to target edge, with arrowhead at end
-    """
     callout_page = doc.load_page(callout_page_index)
     pr = callout_page.rect
 
-    # Choose gutter based on which side callout is on
     callout_c = _center(callout_rect)
     gutter_side = "right" if callout_c.x >= pr.width / 2 else "left"
     gutter_x = pr.width - EDGE_PAD if gutter_side == "right" else EDGE_PAD
 
-    # Page 1: from callout to gutter at same y, then down
-    union = target_rect
-    s, _ = _edge_to_edge_points(callout_rect, union)
+    s, _ = _edge_to_edge_points(callout_rect, target_rect)
 
     y_start = min(max(s.y, EDGE_PAD), pr.height - EDGE_PAD)
     p_gutter_start = fitz.Point(gutter_x, y_start)
@@ -510,14 +491,12 @@ def _draw_multipage_connector(
     _draw_line(callout_page, s, p_gutter_start)
     _draw_line(callout_page, p_gutter_start, p_gutter_bottom)
 
-    # Intermediate pages
     for pi in range(callout_page_index + 1, target_page_index):
         p = doc.load_page(pi)
         pr_i = p.rect
         gx = pr_i.width - EDGE_PAD if gutter_side == "right" else EDGE_PAD
         _draw_line(p, fitz.Point(gx, EDGE_PAD), fitz.Point(gx, pr_i.height - EDGE_PAD))
 
-    # Target page: gutter top -> target_y, then across to target edge with arrowhead
     tp = doc.load_page(target_page_index)
     pr_t = tp.rect
     gx_t = pr_t.width - EDGE_PAD if gutter_side == "right" else EDGE_PAD
@@ -528,8 +507,6 @@ def _draw_multipage_connector(
     p_top = fitz.Point(gx_t, EDGE_PAD)
     p_mid = fitz.Point(gx_t, y_target)
 
-    # End point on target edge (pulled back so arrow tip doesn't enter red box)
-    # We "pretend" start is at gutter point for pullback direction.
     faux_start = fitz.Point(gx_t, y_target)
     if gutter_side == "right":
         end_raw = fitz.Point(target_rect.x1, min(max(y_target, target_rect.y0 + 1.0), target_rect.y1 - 1.0))
@@ -540,13 +517,11 @@ def _draw_multipage_connector(
 
     _draw_line(tp, p_top, p_mid)
     _draw_line(tp, p_mid, end)
-
-    # Arrowhead: tip exactly at end
     _draw_arrowhead(tp, p_mid, end)
 
 
 # ============================================================
-# Margin placement (unchanged behaviour; first-page callouts)
+# Margin placement (callouts on page 1)
 # ============================================================
 
 def _place_annotation_in_margin(
@@ -651,7 +626,6 @@ def _place_annotation_in_margin(
         _, cand, wrapped_text, fs, safe = best
         return cand, wrapped_text, fs, safe
 
-    # last resort fallback
     side, x0_lane, x1_lane, lane_w = lanes[0]
     usable_w = min(MAX_CALLOUT_WIDTH, lane_w)
     fs, wrapped_text, w_used, h_needed = _optimize_layout_for_margin(label, usable_w)
@@ -680,37 +654,64 @@ def _place_annotation_in_margin(
 
 
 # ============================================================
-# Main annotation entrypoint
+# URL special-case helpers (FIX)
 # ============================================================
 
 def _looks_like_url(s: str) -> bool:
     s = (s or "").strip().lower()
     return s.startswith("http://") or s.startswith("https://") or s.startswith("www.")
 
-_STAR_CRITERIA = {"3", "2_past"}  # add "2_future" too if you want this there as well
+
+def _norm_urlish(s: str) -> str:
+    """
+    Normalise so the same footer URL matches even if:
+      - http vs https
+      - www.
+      - trailing /
+      - querystring (?foo=bar)
+      - fragment (#section)
+    """
+    s = (s or "").strip().lower()
+    if not s:
+        return ""
+    s = s.replace("http://", "").replace("https://", "")
+    if s.startswith("www."):
+        s = s[4:]
+    s = s.split("#", 1)[0]
+    s = s.split("?", 1)[0]
+    s = s.rstrip("/")
+    return s
+
+
+def _is_same_urlish(a: str, b: str) -> bool:
+    na = _norm_urlish(a)
+    nb = _norm_urlish(b)
+    if not na or not nb:
+        return False
+    # either identical or one contains the other (covers minor truncations)
+    return na == nb or na in nb or nb in na
+
+
+# ============================================================
+# Stars (kept as-is)
+# ============================================================
+
+_STAR_CRITERIA = {"3", "2_past"}  # add "2_future" if desired
+
 
 def _find_high_star_tokens(page: fitz.Page) -> List[str]:
-    """
-    Returns star tokens on this page that represent 4/5 or 5/5.
-    Supports simple Bachtrack-style "****" and common unicode stars.
-    """
     text = page.get_text("text") or ""
 
     tokens: List[str] = []
 
-    # Bachtrack PDF often contains "****" on its own line
-    # Match 4 or 5 asterisks as a standalone-ish token.
     for m in re.finditer(r"(?m)^\s*(\*{4,5})\s*$", text):
         tokens.append(m.group(1))
 
-    # Common unicode star styles:
-    # "★★★★★" or "★★★★☆" (treat both as 4+)
     for m in re.finditer(r"[★☆]{5}", text):
         tok = m.group(0)
         if tok.count("★") >= 4:
             tokens.append(tok)
 
-    # De-dupe while preserving order
     out = []
     seen = set()
     for t in tokens:
@@ -718,6 +719,11 @@ def _find_high_star_tokens(page: fitz.Page) -> List[str]:
             seen.add(t)
             out.append(t)
     return out
+
+
+# ============================================================
+# Main annotation entrypoint
+# ============================================================
 
 def annotate_pdf_bytes(
     pdf_bytes: bytes,
@@ -736,7 +742,7 @@ def annotate_pdf_bytes(
     occupied_callouts: List[fitz.Rect] = []
 
     # ------------------------------------------------------------
-    # A) Quote highlights (all pages) with URL special-case
+    # A) Quote highlights (all pages) with URL special-case (FIX)
     # ------------------------------------------------------------
     meta_url = (meta.get("source_url") or "").strip()
 
@@ -746,13 +752,9 @@ def annotate_pdf_bytes(
             if not t:
                 continue
 
-            # URL special-case: if term looks like the source URL, only highlight on page 1
-            if meta_url and (
-                t == meta_url
-                or (_looks_like_url(t) and t in meta_url)
-                or (_looks_like_url(meta_url) and meta_url in t)
-            ):
-                if page.number != 0:
+            # FIX: if this term matches the meta URL, only highlight on page 1
+            if meta_url and (_looks_like_url(t) or _looks_like_url(meta_url)):
+                if _is_same_urlish(t, meta_url) and page.number != 0:
                     continue
 
             rects = _search_term(page, t)
@@ -805,14 +807,12 @@ def annotate_pdf_bytes(
         if not needles:
             return
 
-        # Find targets across ALL pages
         targets_by_page: Dict[int, List[fitz.Rect]] = {}
         for needle in needles:
             hits = _find_targets_across_doc(needle)
             for pi, r in hits:
                 targets_by_page.setdefault(pi, []).append(r)
 
-        # Deduplicate per page (prevents nested boxes)
         cleaned_targets_by_page: Dict[int, List[fitz.Rect]] = {}
         for pi, rects in targets_by_page.items():
             deduped = _dedupe_rects(rects, pad=1.0)
@@ -822,14 +822,12 @@ def annotate_pdf_bytes(
         if not cleaned_targets_by_page:
             return
 
-        # Draw red boxes on all pages where found
         for pi, rects in cleaned_targets_by_page.items():
             p = doc.load_page(pi)
             for r in rects:
                 p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_meta_hits += 1
 
-        # Placement targets for the callout on page 1
         if 0 in cleaned_targets_by_page:
             placement_targets = cleaned_targets_by_page[0]
         else:
@@ -840,7 +838,6 @@ def annotate_pdf_bytes(
             page1, placement_targets, occupied_callouts, label
         )
 
-        # Footer no-go shift (belt & suspenders)
         footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
         if footer_no_go.width > 0 and footer_no_go.height > 0 and callout_rect.intersects(footer_no_go):
             shift = (callout_rect.y1 - footer_no_go.y0) + EDGE_PAD
@@ -850,7 +847,6 @@ def annotate_pdf_bytes(
         if not _rect_is_valid(callout_rect):
             return
 
-        # White backing + text
         page1.draw_rect(callout_rect, color=WHITE, fill=WHITE, overlay=True)
 
         final_rect, _ret, _final_fs = _insert_textbox_fit(
@@ -874,7 +870,7 @@ def annotate_pdf_bytes(
             }
         )
 
-    # Your metadata callouts (values must already be populated by AI upstream)
+    # Metadata callouts (values should already be AI-populated upstream)
     _do_job("Original source of publication.", meta.get("source_url"), connect_policy="all")
     _do_job("Venue / distinguished organisation.", meta.get("venue_name"), connect_policy="all")
     _do_job("Ensemble / performing organisation.", meta.get("ensemble_name"), connect_policy="all")
@@ -888,8 +884,7 @@ def annotate_pdf_bytes(
     )
 
     # ------------------------------------------------------------
-    # C) Stars (box only if 4/5 or 5/5, criteria-specific)
-    #     IMPORTANT: do NOT use _do_job here. Just box + add a callout if present.
+    # C) Stars (criteria-specific)
     # ------------------------------------------------------------
     if criterion_id in _STAR_CRITERIA:
         stars_by_page: Dict[int, List[fitz.Rect]] = {}
@@ -904,7 +899,6 @@ def annotate_pdf_bytes(
                 if rects:
                     stars_by_page.setdefault(p.number, []).extend(rects)
 
-        # Draw star boxes
         for pi, rects in stars_by_page.items():
             p = doc.load_page(pi)
             rects = _dedupe_rects(rects, pad=1.0)
@@ -912,9 +906,7 @@ def annotate_pdf_bytes(
                 p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_quote_hits += 1
 
-        # Add a single callout on page 1 if we found any stars anywhere
         if stars_by_page:
-            # pick placement target: stars on page 1 if present, else first star page
             if 0 in stars_by_page:
                 placement_targets = stars_by_page[0]
             else:
