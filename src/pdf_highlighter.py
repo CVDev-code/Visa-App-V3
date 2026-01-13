@@ -151,11 +151,6 @@ def _get_fallback_text_area(page: fitz.Page) -> fitz.Rect:
 
 
 def _detect_actual_text_area(page: fitz.Page) -> fitz.Rect:
-    """
-    Returns a *coarse* bounding box of the main body text.
-    (We treat this as a "soft obstacle" for connectors and a "hard exclusion"
-     for callout boxes in normal placement.)
-    """
     try:
         words = page.get_text("words") or []
         if not words:
@@ -184,11 +179,6 @@ def _detect_actual_text_area(page: fitz.Page) -> fitz.Rect:
         return fitz.Rect(text_left, header_limit, text_right, footer_limit)
     except Exception:
         return _get_fallback_text_area(page)
-
-
-def _header_band(page: fitz.Page) -> fitz.Rect:
-    pr = page.rect
-    return fitz.Rect(0, 0, pr.width, pr.height * 0.12)
 
 
 # ============================================================
@@ -315,14 +305,6 @@ def _dedupe_rects(rects: List[fitz.Rect], pad: float = 1.0) -> List[fitz.Rect]:
             kept.append(r)
     kept.sort(key=lambda r: (r.y0, r.x0))
     return kept
-
-
-def _pick_topmost_rect(rects: List[fitz.Rect]) -> List[fitz.Rect]:
-    rects = _dedupe_rects(rects)
-    if not rects:
-        return []
-    rects.sort(key=lambda r: (r.y0, r.x0))  # smallest y0 = header-most
-    return [rects[0]]
 
 
 # ============================================================
@@ -518,17 +500,12 @@ def _connector_candidates(
     target_rect: fitz.Rect,
     pr: fitz.Rect,
 ) -> List[List[fitz.Point]]:
-
     candidates: List[List[fitz.Point]] = []
     target_c = _center(target_rect)
     y_offsets = [0.0, -10.0, 10.0, -20.0, 20.0, -30.0, 30.0]
-
-    # direct segments
     for dy in y_offsets:
         start, end = _edge_to_edge_points_at_y(callout_rect, target_rect, target_c.y + dy)
         candidates.append([start, end])
-
-    # gutter routes
     for gutter_side in ("left", "right"):
         gutter_x = EDGE_PAD if gutter_side == "left" else pr.width - EDGE_PAD
         for dy in y_offsets:
@@ -543,57 +520,35 @@ def _connector_candidates(
                 end_raw = fitz.Point(target_rect.x0, min(max(y_target, target_rect.y0 + 1.0), target_rect.y1 - 1.0))
             end = _pull_back_point(p_gutter_mid, end_raw, ENDPOINT_PULLBACK)
             candidates.append([start, p_gutter_start, p_gutter_mid, end])
-
     return candidates
 
 
 def _choose_connector_path(
     callout_rect: fitz.Rect,
     target_rect: fitz.Rect,
-    hard_blocked_rects: List[fitz.Rect],
-    soft_blocked_rects: List[fitz.Rect],
+    blocked_rects: List[fitz.Rect],
     pr: fitz.Rect,
-) -> Tuple[List[fitz.Point], Dict[str, int]]:
-    """
-    HARD obstacles: must avoid (callouts / annotation boxes) -> huge penalty.
-    SOFT obstacles: prefer to avoid (body text area, highlight rectangles, footer no-go).
-                    Allowed ONLY if all candidate routes intersect soft obstacles.
-    """
+) -> Tuple[List[fitz.Point], int]:
     candidates = _connector_candidates(callout_rect, target_rect, pr)
-    if not candidates:
-        return [_edge_to_edge_points(callout_rect, target_rect)[0], _edge_to_edge_points(callout_rect, target_rect)[1]], {
-            "hard_hits": 0, "soft_hits": 0
-        }
-
-    scored: List[Tuple[float, List[fitz.Point], int, int]] = []  # (score, pts, hard_hits, soft_hits)
-
+    best_points: List[fitz.Point] = candidates[0]
+    best_score = float("inf")
+    best_hits = 0
     for pts in candidates:
-        hard_hits = 0
-        soft_hits = 0
+        hits = 0
         length = 0.0
         for a, b in zip(pts, pts[1:]):
-            hard_hits += _segment_hits_any(a, b, hard_blocked_rects)
-            soft_hits += _segment_hits_any(a, b, soft_blocked_rects)
+            hits += _segment_hits_any(a, b, blocked_rects)
             length += math.hypot(b.x - a.x, b.y - a.y)
-        # Base scoring: never allow hard hits to win unless unavoidable (practically always avoidable here)
-        score = hard_hits * 10_000_000 + length
-        scored.append((score, pts, hard_hits, soft_hits))
-
-    # 1) Prefer any route with 0 soft hits (AND minimal hard hits)
-    zero_soft = [t for t in scored if t[3] == 0]
-    if zero_soft:
-        best = min(zero_soft, key=lambda t: (t[2], t[0]))  # prioritize fewer hard hits then length
-        return best[1], {"hard_hits": best[2], "soft_hits": best[3]}
-
-    # 2) Otherwise, allow soft hits but still heavily prefer fewer soft hits
-    #    (this is the "last resort" behaviour)
-    best = min(scored, key=lambda t: (t[2], t[3], t[0]))
-    return best[1], {"hard_hits": best[2], "soft_hits": best[3]}
+        score = hits * 10_000 + length
+        if score < best_score:
+            best_score = score
+            best_points = pts
+            best_hits = hits
+    return best_points, best_hits
 
 
 # ============================================================
 # Multi-page routing: down the page margin(s) until target page
-# (unchanged; only page-1 needs soft obstacle last-resort behaviour)
 # ============================================================
 
 def _draw_multipage_connector(
@@ -689,17 +644,13 @@ def _place_annotation_in_margin(
     occupied_callouts: List[fitz.Rect],
     label: str,
 ) -> Tuple[fitz.Rect, str, int, bool]:
-
     text_area = _detect_actual_text_area(page)
-    header_zone = _header_band(page)
-
     pr = page.rect
     target_union = _union_rect(targets)
     target_c = _center(target_union)
     target_y = target_c.y
     target_no_go = inflate_rect(target_union, GAP_FROM_HIGHLIGHTS)
     footer_no_go = fitz.Rect(NO_GO_RECT) & pr
-
     MIN_CALLOUT_WIDTH = 55.0
     MAX_CALLOUT_WIDTH = 180.0
     EDGE_BUFFER = 8.0
@@ -728,22 +679,28 @@ def _place_annotation_in_margin(
     page_mid_x = pr.width / 2.0
     target_side_pref = "left" if target_c.x < page_mid_x else "right"
 
-    # 1) crowdedness score for each side
-    left_lane_rects = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied_callouts if o.x1 < page_mid_x]
-    right_lane_rects = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied_callouts if o.x0 > page_mid_x]
+    # ------------------------------------------------------------------
+    # 1.  Build a quick “crowdedness” score for each side
+    # ------------------------------------------------------------------
+    left_lane_rects  = [inflate_rect(o, GAP_BETWEEN_CALLOUTS)
+                        for o in occupied_callouts if o.x1 < page_mid_x]
+    right_lane_rects = [inflate_rect(o, GAP_BETWEEN_CALLOUTS)
+                        for o in occupied_callouts if o.x0 > page_mid_x]
 
     def _crowded_score(lane_rects, lane_x0, lane_x1):
         if not lane_rects:
             return 0
         area_covered = sum((r.x1 - r.x0) * (r.y1 - r.y0) for r in lane_rects)
-        lane_area = (lane_x1 - lane_x0) * pr.height
+        lane_area    = (lane_x1 - lane_x0) * pr.height
         return 100 * area_covered / max(lane_area, 1)
 
-    left_score = _crowded_score(left_lane_rects, *left_lane[0:2]) if any(t[0] == "left" for t in lanes) else 0
+    left_score  = _crowded_score(left_lane_rects,  *left_lane[0:2]) if any(t[0] == "left"  for t in lanes) else 0
     right_score = _crowded_score(right_lane_rects, *right_lane[0:2]) if any(t[0] == "right" for t in lanes) else 0
 
-    # 2) LLM side pick when both sides are legal and crowded
-    if len(lanes) == 2 and max(left_score, right_score) > 20:
+    # ------------------------------------------------------------------
+    # 2.  Ask LLM only when BOTH sides are geometrically legal
+    # ------------------------------------------------------------------
+    if len(lanes) == 2 and max(left_score, right_score) > 20:   # “crowded” threshold
         quote_snippet = ""
         if targets:
             clip = inflate_rect(targets[0], 2)
@@ -751,23 +708,12 @@ def _place_annotation_in_margin(
         chosen_side = _llm_side_pick(left_score, right_score, quote_snippet, label)
         lanes.sort(key=lambda t: 0 if t[0] == chosen_side else 1)
     else:
+        # original deterministic preference
         lanes.sort(key=lambda t: 0 if t[0] == target_side_pref else 1)
 
     occupied_buf = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied_callouts]
     scan = [12, -12, 24, -24, 36, -36, 48, -48, 60, -60, 72, -72, 0]
     best = None  # (score, rect, wrapped, fs, safe)
-
-    def _cand_is_allowed(cand: fitz.Rect) -> bool:
-        # Hard exclusions for callout boxes:
-        if cand.intersects(target_no_go):
-            return False
-        if cand.intersects(text_area):
-            return False
-        if cand.intersects(header_zone):
-            return False
-        if footer_no_go.width > 0 and footer_no_go.height > 0 and cand.intersects(footer_no_go):
-            return False
-        return True
 
     for side, x0_lane, x1_lane, lane_w in lanes:
         usable_w = min(MAX_CALLOUT_WIDTH, lane_w)
@@ -775,7 +721,6 @@ def _place_annotation_in_margin(
         w_used = min(w_used, usable_w)
         if w_used < MIN_CALLOUT_WIDTH:
             continue
-
         for dy in scan:
             y0 = target_y + dy - h_needed / 2.0
             y1 = target_y + dy + h_needed / 2.0
@@ -785,85 +730,56 @@ def _place_annotation_in_margin(
                 y1 = min(pr.height - EDGE_BUFFER, y0 + MIN_H)
                 if (y1 - y0) < MIN_H:
                     y0 = max(EDGE_BUFFER, y1 - MIN_H)
-
             if side == "left":
                 x1 = x1_lane - 5.0
                 x0 = max(x0_lane, x1 - w_used)
             else:
                 x0 = x0_lane + 5.0
                 x1 = min(x1_lane, x0 + w_used)
-
             cand = fitz.Rect(x0, y0, x1, y1)
             cand = _ensure_min_size(cand, pr)
-
-            if not _cand_is_allowed(cand):
+            if cand.intersects(target_no_go):
                 continue
-
+            if cand.intersects(text_area):
+                continue
+            if footer_no_go.width > 0 and footer_no_go.height > 0 and cand.intersects(footer_no_go):
+                continue
             conflicts = any(cand.intersects(o) for o in occupied_buf)
             connector_start, connector_end = _edge_to_edge_points(cand, target_union)
-            connector_conflict = any(_segment_hits_rect(connector_start, connector_end, o) for o in occupied_buf)
-
+            connector_conflict = any(
+                _segment_hits_rect(connector_start, connector_end, o) for o in occupied_buf
+            )
             safe = not conflicts and not connector_conflict
             dx = abs(_center(cand).x - target_c.x)
             dy_zero_penalty = 5.0 if dy == 0 else 0.0
             line_penalty = 2_500 if connector_conflict else 0.0
             score = (0 if safe else 10_000) + line_penalty + dx * 0.8 + abs(dy) * 0.15 + dy_zero_penalty
-
             if best is None or score < best[0]:
                 best = (score, cand, wrapped_text, fs, safe)
-
             if safe and dy != 0:
                 return cand, wrapped_text, fs, True
-
     if best:
         _, cand, wrapped_text, fs, safe = best
         return cand, wrapped_text, fs, safe
-
-    # ---------------------------------------------------------
-    # LAST RESORT fallback:
-    # still re-check text_area, header, target_no_go, footer
-    # ---------------------------------------------------------
+    # last resort fallback
     side, x0_lane, x1_lane, lane_w = lanes[0]
     usable_w = min(MAX_CALLOUT_WIDTH, lane_w)
     fs, wrapped_text, w_used, h_needed = _optimize_layout_for_margin(label, usable_w)
     w_used = min(w_used, usable_w)
-
-    # try a few vertical nudges to satisfy hard exclusions
-    fallback_scan = [0, 18, -18, 36, -36, 54, -54, 72, -72, 90, -90, 108, -108]
-    for dy in fallback_scan:
-        y0 = max(EDGE_BUFFER, target_y + dy - h_needed / 2.0)
-        y1 = min(pr.height - EDGE_BUFFER, target_y + dy + h_needed / 2.0)
-        if (y1 - y0) < MIN_H:
-            y1 = min(pr.height - EDGE_BUFFER, y0 + MIN_H)
-
-        if side == "left":
-            x1 = x1_lane - 5.0
-            x0 = max(x0_lane, x1 - w_used)
-        else:
-            x0 = x0_lane + 5.0
-            x1 = min(x1_lane, x0 + w_used)
-
-        cand = fitz.Rect(x0, y0, x1, y1)
-        cand = _ensure_min_size(cand, pr)
-
-        # keep footer fix
-        if footer_no_go.width > 0 and footer_no_go.height > 0 and cand.intersects(footer_no_go):
-            shift = (cand.y1 - footer_no_go.y0) + EDGE_BUFFER
-            cand = _shift_rect_up(cand, shift, min_y=EDGE_BUFFER)
-            cand = _ensure_min_size(cand, pr)
-
-        if _cand_is_allowed(cand):
-            return cand, wrapped_text, fs, False
-
-    # absolute final (should be rare): return a lane slot, but still try to keep it off the header/footer bands
-    y0 = max(EDGE_BUFFER, min(pr.height - EDGE_BUFFER - h_needed, target_y - h_needed / 2.0))
-    y1 = min(pr.height - EDGE_BUFFER, y0 + h_needed)
-    cand = fitz.Rect(
-        (x1_lane - 5.0 - w_used) if side == "left" else (x0_lane + 5.0),
-        y0,
-        (x1_lane - 5.0) if side == "left" else (x0_lane + 5.0 + w_used),
-        y1,
-    )
+    y0 = max(EDGE_BUFFER, target_y - h_needed / 2.0)
+    y1 = min(pr.height - EDGE_BUFFER, target_y + h_needed / 2.0)
+    if (y1 - y0) < MIN_H:
+        y1 = min(pr.height - EDGE_BUFFER, y0 + MIN_H)
+    if side == "left":
+        x1 = x1_lane - 5.0
+        x0 = max(x0_lane, x1 - w_used)
+    else:
+        x0 = x0_lane + 5.0
+        x1 = min(x1_lane, x0 + w_used)
+    cand = fitz.Rect(x0, y0, x1, y1)
+    if footer_no_go.width > 0 and footer_no_go.height > 0 and cand.intersects(footer_no_go):
+        shift = (cand.y1 - footer_no_go.y0) + EDGE_BUFFER
+        cand = _shift_rect_up(cand, shift, min_y=EDGE_BUFFER)
     cand = _ensure_min_size(cand, pr)
     return cand, wrapped_text, fs, False
 
@@ -902,69 +818,31 @@ def annotate_pdf_bytes(
     criterion_id: str,
     meta: Dict,
 ) -> Tuple[bytes, Dict]:
-
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     if len(doc) == 0:
         return pdf_bytes, {}
-
     page1 = doc.load_page(0)
-    pr1 = page1.rect
-
     total_quote_hits = 0
     total_meta_hits = 0
-
     occupied_callouts: List[fitz.Rect] = []
     connectors_to_draw: List[Dict[str, Any]] = []
 
-    # Track highlight rects on page 1 to use as SOFT obstacles for arrows
-    page1_highlights: List[fitz.Rect] = []
-
-    # Precompute SOFT obstacles for page 1 arrows
-    page1_text_area = _detect_actual_text_area(page1)
-    page1_footer_no_go = fitz.Rect(NO_GO_RECT) & pr1
-
-    def _soft_rects_for_page1() -> List[fitz.Rect]:
-        soft: List[fitz.Rect] = []
-        if page1_text_area.width > 0 and page1_text_area.height > 0:
-            soft.append(inflate_rect(page1_text_area, GAP_FROM_TEXT_BLOCKS))
-        if page1_footer_no_go.width > 0 and page1_footer_no_go.height > 0:
-            soft.append(inflate_rect(page1_footer_no_go, 2.0))
-        # highlights (inflated slightly)
-        for r in page1_highlights:
-            soft.append(inflate_rect(r, 2.0))
-        # de-dupe soft rects lightly
-        return _dedupe_rects(soft, pad=0.5)
-
-    # ------------------------------------------------------------
-    # 1) Highlights for quotes (URL: page 1 only, prefer header-most)
-    # ------------------------------------------------------------
+    # 1. Highlights for quotes (restricting URLs to Page 1)
     meta_url = (meta.get("source_url") or "").strip()
-
     for page in doc:
         for term in (quote_terms or []):
             t = (term or "").strip()
             if not t:
                 continue
-
             is_url_term = _looks_like_url(t) or (meta_url and _is_same_urlish(t, meta_url))
             if is_url_term and page.number != 0:
                 continue
-
             rects = _search_term(page, t)
-
-            # URL: choose only the header-most match on page 1 (no boxing both header+footer)
-            if is_url_term and page.number == 0:
-                rects = _pick_topmost_rect(rects)
-
             for r in _dedupe_rects(rects):
                 page.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_quote_hits += 1
-                if page.number == 0:
-                    page1_highlights.append(r)
 
-    # ------------------------------------------------------------
-    # 2) Metadata logic
-    # ------------------------------------------------------------
+    # 2. Metadata logic
     def _find_targets_across_doc(needle: str, *, page_indices: Optional[List[int]] = None) -> List[Tuple[int, fitz.Rect]]:
         out = []
         needle = (needle or "").strip()
@@ -983,29 +861,18 @@ def annotate_pdf_bytes(
 
     def _do_job(label: str, value: Optional[str], variants: List[str] = None):
         nonlocal total_meta_hits
-
         val_str = str(value or "").strip()
         if not val_str:
             return
-
         is_url = _looks_like_url(val_str) or (meta_url and _is_same_urlish(val_str, meta_url))
         indices = [0] if is_url else None
-
-        targets_by_page: Dict[int, List[fitz.Rect]] = {}
+        targets_by_page = {}
         needles = list(dict.fromkeys([val_str] + (variants or [])))
-
         for n in needles:
             for pi, r in _find_targets_across_doc(n, page_indices=indices):
                 targets_by_page.setdefault(pi, []).append(r)
-
         if not targets_by_page:
             return
-
-        # URL job: keep ONLY the header-most URL on page 1 (no boxing / connecting to both)
-        if is_url and 0 in targets_by_page:
-            targets_by_page[0] = _pick_topmost_rect(targets_by_page[0])
-
-        # Draw highlight boxes (only for the retained rects)
         for pi, rects in targets_by_page.items():
             if is_url and pi != 0:
                 continue
@@ -1013,38 +880,27 @@ def annotate_pdf_bytes(
             for r in _dedupe_rects(rects):
                 p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_meta_hits += 1
-                if pi == 0:
-                    page1_highlights.append(r)
-
-        # Callout targets: URL only on page 1; others across doc
-        targets_for_callout_map: Dict[int, List[fitz.Rect]] = {}
+        targets_for_callout_map = {}
         if is_url:
             if 0 in targets_by_page:
                 targets_for_callout_map = {0: targets_by_page[0]}
         else:
             targets_for_callout_map = targets_by_page
-
         if not targets_for_callout_map:
             return
-
-        # anchor callout placement on page 1 target if present, else first target page
         if 0 in targets_for_callout_map:
             p_targets = targets_for_callout_map[0]
         else:
             first_pi = sorted(targets_for_callout_map.keys())[0]
             p_targets = targets_for_callout_map[first_pi]
-
         crect, wtext, fs, _ = _place_annotation_in_margin(page1, p_targets, occupied_callouts, label)
-
         footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
         if footer_no_go.width > 0 and footer_no_go.height > 0 and crect.intersects(footer_no_go):
             shift = (crect.y1 - footer_no_go.y0) + EDGE_PAD
             crect = _shift_rect_up(crect, shift, min_y=EDGE_PAD)
-
         crect = _ensure_min_size(crect, page1.rect)
         if not _rect_is_valid(crect):
             return
-
         page1.draw_rect(crect, color=WHITE, fill=WHITE, overlay=True)
         final_r, _, _ = _insert_textbox_fit(page1, crect, wtext, fontname=FONTNAME, fontsize=fs, color=RED)
         occupied_callouts.append(final_r)
@@ -1056,11 +912,9 @@ def annotate_pdf_bytes(
     _do_job("Performance date.", meta.get("performance_date"))
     _do_job("Beneficiary lead role evidence.", meta.get("beneficiary_name"), meta.get("beneficiary_variants"))
 
-    # ------------------------------------------------------------
-    # 3) Stars Logic (unchanged, but add star highlights to page1_highlights)
-    # ------------------------------------------------------------
+    # 3. Stars Logic
     if criterion_id in _STAR_CRITERIA:
-        stars_map: Dict[int, List[fitz.Rect]] = {}
+        stars_map = {}
         for p in doc:
             for tok in _find_high_star_tokens(p):
                 found = p.search_for(tok)
@@ -1069,26 +923,17 @@ def annotate_pdf_bytes(
                     for r in _dedupe_rects(found):
                         p.draw_rect(r, color=RED, width=BOX_WIDTH)
                         total_quote_hits += 1
-                        if p.number == 0:
-                            page1_highlights.append(r)
-
         if stars_map:
             if 0 in stars_map:
                 p_targets = stars_map[0]
             else:
                 first_pi = sorted(stars_map.keys())[0]
                 p_targets = stars_map[first_pi]
-
-            crect, wtext, fs, _ = _place_annotation_in_margin(
-                page1, p_targets, occupied_callouts,
-                "Highly acclaimed review of the distinguished performance."
-            )
-
+            crect, wtext, fs, _ = _place_annotation_in_margin(page1, p_targets, occupied_callouts, "Highly acclaimed review of the distinguished performance.")
             footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
             if footer_no_go.width > 0 and footer_no_go.height > 0 and crect.intersects(footer_no_go):
                 shift = (crect.y1 - footer_no_go.y0) + EDGE_PAD
                 crect = _shift_rect_up(crect, shift, min_y=EDGE_PAD)
-
             crect = _ensure_min_size(crect, page1.rect)
             if _rect_is_valid(crect):
                 page1.draw_rect(crect, color=WHITE, fill=WHITE, overlay=True)
@@ -1096,26 +941,19 @@ def annotate_pdf_bytes(
                 occupied_callouts.append(final_r)
                 connectors_to_draw.append({"final_rect": final_r, "targets_by_page": stars_map})
 
-    # ------------------------------------------------------------
-    # 4) Draw Connectors
-    #    HARD: other callout boxes
-    #    SOFT: body text area + highlight rects + footer no-go
-    # ------------------------------------------------------------
+    # 4. Draw Connectors
     for item in connectors_to_draw:
         fr = item["final_rect"]
-
-        hard_blocked = [
+        pr = page1.rect
+        blocked = [
             inflate_rect(o, GAP_BETWEEN_CALLOUTS)
             for o in occupied_callouts
             if o != fr
         ]
-
-        soft_blocked = _soft_rects_for_page1()
-
         for pi, rects in item["targets_by_page"].items():
             for r in _dedupe_rects(rects):
                 if pi == 0:
-                    points, _stats = _choose_connector_path(fr, r, hard_blocked, soft_blocked, pr1)
+                    points, _ = _choose_connector_path(fr, r, blocked, pr)
                     _draw_connector(page1, points)
                 else:
                     _draw_multipage_connector(doc, 0, fr, pi, r)
@@ -1124,8 +962,4 @@ def annotate_pdf_bytes(
     doc.save(out)
     doc.close()
     out.seek(0)
-    return out.getvalue(), {
-        "total_quote_hits": total_quote_hits,
-        "total_meta_hits": total_meta_hits,
-        "criterion_id": criterion_id
-    }
+    return out.getvalue(), {"total_quote_hits": total_quote_hits, "total_meta_hits": total_meta_hits, "criterion_id": criterion_id}
