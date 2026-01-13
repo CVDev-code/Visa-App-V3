@@ -578,50 +578,96 @@ def _route_connector_no_callout_crossing(
     callout: fitz.Rect,
     target: fitz.Rect,
     callout_blocks: List[fitz.Rect],
+    highlight_rects: List[fitz.Rect],   # <-- NEW: all red-box rects on page 1
 ) -> List[fitz.Point]:
     """
-    Route: callout edge -> gutter (outside margins) -> vertical -> target edge.
-    This makes it extremely unlikely to cross any callout box.
-    If a segment would still cross a callout, it tries the other gutter.
+    Route: callout edge -> gutter -> (optionally dogleg) -> target edge.
+    Goal:
+      - NEVER go through callout boxes
+      - MINIMISE going through highlight boxes (red boxes)
+      - Connect into the target box edge (right edge when coming from right gutter)
     """
     pr = page.rect
-    tc = _center(target)
 
-    gutters = [
-        EDGE_PAD,               # left gutter
-        pr.width - EDGE_PAD,    # right gutter
-    ]
+    def count_hits(a: fitz.Point, b: fitz.Point, rects: List[fitz.Rect]) -> int:
+        return sum(1 for r in rects if _segment_hits_rect(a, b, r))
 
-    # Try preferred gutter based on which side callout is on
+    gutters = [EDGE_PAD, pr.width - EDGE_PAD]
     callout_c = _center(callout)
     preferred = gutters[1] if callout_c.x > pr.width / 2 else gutters[0]
     ordered_gutters = [preferred] + [g for g in gutters if g != preferred]
 
+    tc = _center(target)
+
+    # y candidates: center, then just above / just below the target box, then wider
+    y_candidates = [
+        tc.y,
+        target.y0 - 6, target.y1 + 6,
+        tc.y - 12, tc.y + 12,
+        tc.y - 24, tc.y + 24,
+        tc.y - 36, tc.y + 36,
+    ]
+    y_candidates = [min(max(y, EDGE_PAD), pr.height - EDGE_PAD) for y in y_candidates]
+
+    best_pts = None
+    best_score = float("inf")
+
     for gx in ordered_gutters:
         start = _callout_edge_point_toward_gutter(callout, gx)
-        # pull outward just a touch so we don't graze callout boundary
-        start_out = fitz.Point(gx, start.y)
+        p_gutter_start = fitz.Point(gx, start.y)
 
-        mid = fitz.Point(gx, min(max(tc.y, EDGE_PAD), pr.height - EDGE_PAD))
-        end_raw = _target_edge_point_toward_gutter(target, gx, mid.y)
-        end = _pull_back_point(mid, end_raw, ENDPOINT_PULLBACK)
+        for y in y_candidates:
+            # gutter vertical landing point
+            p_gutter_mid = fitz.Point(gx, y)
 
-        pts = [start, start_out, mid, end]
+            # Approach point just OUTSIDE the target edge on the gutter side
+            # so the long horizontal segment doesn't plough through other highlights.
+            if gx > target.x1:
+                approach = fitz.Point(target.x1 + 3, y)
+                end_raw = fitz.Point(target.x1, min(max(y, target.y0 + 1), target.y1 - 1))
+            else:
+                approach = fitz.Point(target.x0 - 3, y)
+                end_raw = fitz.Point(target.x0, min(max(y, target.y0 + 1), target.y1 - 1))
 
-        # Validate: no segment goes through any callout block (inflated)
-        ok = True
-        for a, b in zip(pts, pts[1:]):
-            for br in callout_blocks:
-                if _segment_hits_rect(a, b, br):
-                    ok = False
+            end = _pull_back_point(approach, end_raw, ENDPOINT_PULLBACK)
+
+            # Candidate polyline:
+            # callout -> gutter start -> gutter mid -> approach (outside target) -> end (into target)
+            pts = [start, p_gutter_start, p_gutter_mid, approach, end]
+
+            # 1) HARD constraint: must not intersect callout boxes
+            hard_ok = True
+            for a, b in zip(pts, pts[1:]):
+                for br in callout_blocks:
+                    if _segment_hits_rect(a, b, br):
+                        hard_ok = False
+                        break
+                if not hard_ok:
                     break
-            if not ok:
-                break
+            if not hard_ok:
+                continue
 
-        if ok:
-            return pts
+            # 2) Soft scoring: minimise highlight crossings (excluding the target itself)
+            other_highlights = [r for r in highlight_rects if not r.intersects(target)]
+            soft_hits = 0
+            length = 0.0
+            for a, b in zip(pts, pts[1:]):
+                soft_hits += count_hits(a, b, other_highlights)
+                length += math.hypot(b.x - a.x, b.y - a.y)
 
-    # Absolute last resort: direct line (still pulled back)
+            score = soft_hits * 100000 + length
+            if score < best_score:
+                best_score = score
+                best_pts = pts
+
+            # If we found a route with 0 soft hits, take it immediately
+            if soft_hits == 0:
+                return pts
+
+    # If all else fails, return the least-bad candidate; else fall back to direct
+    if best_pts is not None:
+        return best_pts
+
     start = fitz.Point(callout.x1, (callout.y0 + callout.y1) / 2.0)
     end_raw = fitz.Point(target.x0, (target.y0 + target.y1) / 2.0)
     end = _pull_back_point(start, end_raw, ENDPOINT_PULLBACK)
