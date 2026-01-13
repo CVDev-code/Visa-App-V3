@@ -569,8 +569,12 @@ def _route_connector_page1(
 
     # Evaluate many candidate polylines, pick minimum (hits, then length)
     for gx in gutters:
-        # Choose callout x on the side facing that gutter
-        start_x = callout.x0 if gx < pr.width / 2 else callout.x1
+        # Choose callout x on the side facing that gutter, nudged outside the box.
+        if gx < pr.width / 2:
+            start_x = callout.x0 - 2.0
+        else:
+            start_x = callout.x1 + 2.0
+        start_x = _clamp(start_x, EDGE_PAD, pr.width - EDGE_PAD)
 
         for sy in start_ys:
             start = fitz.Point(start_x, sy)
