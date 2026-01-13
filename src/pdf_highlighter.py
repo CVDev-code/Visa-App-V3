@@ -84,6 +84,9 @@ def _segment_hits_rect(p1: fitz.Point, p2: fitz.Point, r: fitz.Rect, steps: int 
             return True
     return False
 
+def _segment_hits_any(p1: fitz.Point, p2: fitz.Point, rects: List[fitz.Rect]) -> int:
+    return sum(1 for r in rects if _segment_hits_rect(p1, p2, r))
+
 
 def _shift_rect_up(rect: fitz.Rect, shift: float, min_y: float = 2.0) -> fitz.Rect:
     if shift <= 0:
@@ -456,6 +459,14 @@ def _draw_line(page: fitz.Page, a: fitz.Point, b: fitz.Point):
     page.draw_line(a, b, color=RED, width=LINE_WIDTH)
 
 
+def _draw_connector(page: fitz.Page, points: List[fitz.Point]):
+    if len(points) < 2:
+        return
+    for a, b in zip(points, points[1:]):
+        _draw_line(page, a, b)
+    _draw_arrowhead(page, points[-2], points[-1])
+
+
 # ============================================================
 # Connector endpoints (edge-to-edge with pullback)
 # ============================================================
@@ -513,6 +524,91 @@ def _edge_to_edge_points(callout_rect: fitz.Rect, target_rect: fitz.Rect) -> Tup
 
     return start, end
 
+def _edge_to_edge_points_at_y(
+    callout_rect: fitz.Rect,
+    target_rect: fitz.Rect,
+    desired_y: float,
+) -> Tuple[fitz.Point, fitz.Point]:
+    if callout_rect.x0 >= target_rect.x1:
+        start_x = callout_rect.x0
+        end_x = target_rect.x1
+    elif callout_rect.x1 <= target_rect.x0:
+        start_x = callout_rect.x1
+        end_x = target_rect.x0
+    else:
+        cc = _center(callout_rect)
+        tc = _center(target_rect)
+        if cc.x > tc.x:
+            start_x = callout_rect.x0
+            end_x = target_rect.x1
+        else:
+            start_x = callout_rect.x1
+            end_x = target_rect.x0
+
+    start_y = min(max(desired_y, callout_rect.y0 + 1), callout_rect.y1 - 1)
+    end_y = min(max(desired_y, target_rect.y0 + 1), target_rect.y1 - 1)
+
+    start = fitz.Point(start_x, start_y)
+    end_raw = fitz.Point(end_x, end_y)
+    end = _pull_back_point(start, end_raw, ENDPOINT_PULLBACK)
+    return start, end
+
+def _connector_candidates(
+    callout_rect: fitz.Rect,
+    target_rect: fitz.Rect,
+    pr: fitz.Rect,
+) -> List[List[fitz.Point]]:
+    candidates: List[List[fitz.Point]] = []
+    target_c = _center(target_rect)
+    y_offsets = [0.0, -10.0, 10.0, -20.0, 20.0, -30.0, 30.0]
+
+    for dy in y_offsets:
+        start, end = _edge_to_edge_points_at_y(callout_rect, target_rect, target_c.y + dy)
+        candidates.append([start, end])
+
+    for gutter_side in ("left", "right"):
+        gutter_x = EDGE_PAD if gutter_side == "left" else pr.width - EDGE_PAD
+        for dy in y_offsets:
+            start, _ = _edge_to_edge_points_at_y(callout_rect, target_rect, target_c.y + dy)
+            y_start = min(max(start.y, EDGE_PAD), pr.height - EDGE_PAD)
+            y_target = min(max(target_c.y + dy, EDGE_PAD), pr.height - EDGE_PAD)
+
+            p_gutter_start = fitz.Point(gutter_x, y_start)
+            p_gutter_mid = fitz.Point(gutter_x, y_target)
+            if gutter_side == "right":
+                end_raw = fitz.Point(target_rect.x1, min(max(y_target, target_rect.y0 + 1.0), target_rect.y1 - 1.0))
+            else:
+                end_raw = fitz.Point(target_rect.x0, min(max(y_target, target_rect.y0 + 1.0), target_rect.y1 - 1.0))
+            end = _pull_back_point(p_gutter_mid, end_raw, ENDPOINT_PULLBACK)
+            candidates.append([start, p_gutter_start, p_gutter_mid, end])
+
+    return candidates
+
+
+def _choose_connector_path(
+    callout_rect: fitz.Rect,
+    target_rect: fitz.Rect,
+    blocked_rects: List[fitz.Rect],
+    pr: fitz.Rect,
+) -> Tuple[List[fitz.Point], int]:
+    candidates = _connector_candidates(callout_rect, target_rect, pr)
+    best_points: List[fitz.Point] = candidates[0]
+    best_score = float("inf")
+    best_hits = 0
+
+    for pts in candidates:
+        hits = 0
+        length = 0.0
+        for a, b in zip(pts, pts[1:]):
+            hits += _segment_hits_any(a, b, blocked_rects)
+            length += math.hypot(b.x - a.x, b.y - a.y)
+        score = hits * 10_000 + length
+        if score < best_score:
+            best_score = score
+            best_points = pts
+            best_hits = hits
+
+    return best_points, best_hits
 
 # ============================================================
 # Multi-page routing: down the page margin(s) until target page
@@ -903,12 +999,17 @@ def annotate_pdf_bytes(
     # 4. Draw Connectors
     for item in connectors_to_draw:
         fr = item["final_rect"]
+        pr = page1.rect
+        blocked = [
+            inflate_rect(o, GAP_BETWEEN_CALLOUTS)
+            for o in occupied_callouts
+            if o != fr
+        ]
         for pi, rects in item["targets_by_page"].items():
             for r in _dedupe_rects(rects):
                 if pi == 0:
-                    s, e = _edge_to_edge_points(fr, r)
-                    _draw_line(page1, s, e)
-                    _draw_arrowhead(page1, s, e)
+                    points, _ = _choose_connector_path(fr, r, blocked, pr)
+                    _draw_connector(page1, points)
                 else:
                     _draw_multipage_connector(doc, 0, fr, pi, r)
 
