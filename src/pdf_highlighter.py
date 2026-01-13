@@ -1138,10 +1138,10 @@ def annotate_pdf_bytes(
                         hard_obstacles=hard_obs,
                         soft_rects=soft_rects_p1,
                     )
-                    _draw_poly_connector(page1, pts, overlay=True)  # arrows drawn first
+                    _draw_poly_connector(page1, pts, overlay=False)  # arrows drawn first
             else:
                 for r in rr:
-                    _draw_multipage_connector(doc, 0, fr, pi, r, overlay=True)
+                    _draw_multipage_connector(doc, 0, fr, pi, r, overlay=False)
 
     # ------------------------------------------------------------
     # 5) Draw callouts LAST (white box + text), so arrows never appear on top
