@@ -911,7 +911,7 @@ def annotate_pdf_bytes(
         preferred_rect_p1 = item.get("preferred_rect_p1")
 
         # IMPORTANT: exclude *this* callout from the obstacle list
-        callout_blocks = [inflate_rect(c, GAP_BETWEEN_CALLOUTS / 2.0) for c in all_callouts if c is not fr]
+        callout_blocks = [inflate_rect(c, GAP_BETWEEN_CALLOUTS / 2.0) for c in all_callouts]
 
         for pi, rects in item["targets_by_page"].items():
             rr = _dedupe_rects(rects)
