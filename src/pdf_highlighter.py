@@ -27,7 +27,7 @@ NO_GO_RECT = fitz.Rect(
 EDGE_PAD = 12.0
 GAP_FROM_TEXT_BLOCKS = 8.0
 GAP_FROM_HIGHLIGHTS = 10.0
-GAP_BETWEEN_CALLOUTS = 10.0  # consistent legibility gap
+GAP_BETWEEN_CALLOUTS = 10.0
 ENDPOINT_PULLBACK = 1.5
 
 # Arrowhead
@@ -145,10 +145,6 @@ def _get_fallback_text_area(page: fitz.Page) -> fitz.Rect:
 
 
 def _detect_actual_text_area(page: fitz.Page) -> fitz.Rect:
-    """
-    Coarse bounding box of main body text region.
-    Used as a hard exclusion zone for callout boxes.
-    """
     try:
         words = page.get_text("words") or []
         if not words:
@@ -372,7 +368,7 @@ def _search_term(page: fitz.Page, term: str) -> List[fitz.Rect]:
 
 
 # ============================================================
-# URL helpers (reverted – no header prioritisation)
+# URL helpers
 # ============================================================
 
 def _looks_like_url(s: str) -> bool:
@@ -431,22 +427,16 @@ def _draw_poly_connector(page: fitz.Page, pts: List[fitz.Point]):
 
 
 # ============================================================
-# Deterministic margin lanes (equal widths)
+# Margin lanes
 # ============================================================
 
 def _compute_equal_margins(page: fitz.Page) -> Tuple[fitz.Rect, fitz.Rect, fitz.Rect]:
-    """
-    Returns (text_area, left_lane_rect, right_lane_rect) with equal lane widths.
-    Lanes are outside the detected text_area and symmetric by width.
-    """
     pr = page.rect
     text_area = _detect_actual_text_area(page)
 
     left_available = max(0.0, text_area.x0 - EDGE_PAD)
     right_available = max(0.0, (pr.width - EDGE_PAD) - text_area.x1)
     lane_w = max(0.0, min(left_available, right_available))
-
-    # Ensure lanes are real rectangles; if lane_w is too small, you still get something minimal
     lane_w = max(lane_w, 60.0)
 
     left_lane = fitz.Rect(EDGE_PAD, EDGE_PAD, EDGE_PAD + lane_w, pr.height - EDGE_PAD)
@@ -460,7 +450,6 @@ def _choose_side_for_label(label: str) -> str:
         return "left"
     if label in SIDE_RIGHT_LABELS:
         return "right"
-    # default (if you add more later)
     return "left"
 
 
@@ -472,121 +461,56 @@ def _rect_conflicts(r: fitz.Rect, occupied: List[fitz.Rect], pad: float = 0.0) -
     return False
 
 
-def _place_callout_in_lane(
-    page: fitz.Page,
-    lane: fitz.Rect,
-    text_area: fitz.Rect,
-    target_union: fitz.Rect,
-    occupied_same_side: List[fitz.Rect],
-    label: str,
-) -> Tuple[fitz.Rect, str, int]:
-    """
-    Place a callout box in the given lane near target y, maintaining a minimum gap.
-    Hard rules:
-      - must be inside lane
-      - must not intersect text_area
-      - must not intersect target_no_go (inflated target)
-      - must not intersect footer no-go
-      - must not overlap other callouts on the same side
-    """
-    pr = page.rect
-    footer_no_go = fitz.Rect(NO_GO_RECT) & pr
-    target_no_go = inflate_rect(target_union, GAP_FROM_HIGHLIGHTS)
+# ============================================================
+# Closest-edge routing
+# ============================================================
 
-    lane_w = lane.x1 - lane.x0
-    max_w = min(180.0, lane_w - 8.0)
-    max_w = max(max_w, 70.0)
+def _closest_edge_point(rect: fitz.Rect, target: fitz.Rect) -> fitz.Point:
+    cx = (rect.x0 + rect.x1) / 2
+    cy = (rect.y0 + rect.y1) / 2
+    tcx = (target.x0 + target.x1) / 2
+    tcy = (target.y0 + target.y1) / 2
 
-    fs, wrapped, w_used, h_needed = _optimize_layout_for_margin(label, max_w)
-    w_used = min(w_used, max_w)
+    left_dist = abs(rect.x0 - tcx)
+    right_dist = abs(rect.x1 - tcx)
+    top_dist = abs(rect.y0 - tcy)
+    bottom_dist = abs(rect.y1 - tcy)
 
-    # Create a candidate rect for a given center y
-    def build_at_y(cy: float) -> fitz.Rect:
-        y0 = cy - h_needed / 2.0
-        y1 = cy + h_needed / 2.0
-        y0 = max(lane.y0, y0)
-        y1 = min(lane.y1, y1)
-        if (y1 - y0) < (h_needed * 0.85):
-            # enforce minimum height region
-            y1 = min(lane.y1, y0 + h_needed)
-            y0 = max(lane.y0, y1 - h_needed)
+    min_dist = min(left_dist, right_dist, top_dist, bottom_dist)
 
-        x0 = lane.x0 + 4.0
-        x1 = min(lane.x1 - 4.0, x0 + w_used)
-        cand = fitz.Rect(x0, y0, x1, y1)
-        cand = _ensure_min_size(cand, pr, min_w=55.0, min_h=14.0)
-        return cand
+    if min_dist == left_dist:
+        return fitz.Point(rect.x0, cy)
+    elif min_dist == right_dist:
+        return fitz.Point(rect.x1, cy)
+    elif min_dist == top_dist:
+        return fitz.Point(cx, rect.y0)
+    else:
+        return fitz.Point(cx, rect.y1)
 
-    def allowed(cand: fitz.Rect) -> bool:
-        if not lane.contains(cand):
-            return False
-        if cand.intersects(text_area):
-            return False
-        if cand.intersects(target_no_go):
-            return False
-        if footer_no_go.width > 0 and footer_no_go.height > 0 and cand.intersects(footer_no_go):
-            return False
-        if _rect_conflicts(cand, occupied_same_side, pad=GAP_BETWEEN_CALLOUTS):
-            return False
-        return True
 
-    # Scan around target y to find closest available slot
-    target_y = _center(target_union).y
-    scan_steps = [0, 20, -20, 40, -40, 60, -60, 80, -80, 100, -100, 120, -120, 150, -150, 180, -180]
-
-    for dy in scan_steps:
-        cand = build_at_y(target_y + dy)
-        if allowed(cand):
-            return cand, wrapped, fs
-
-    # If still not found, try stacking below/above existing callouts within lane
-    # (Pick the first open "slot" in reading order)
-    y_cursor = lane.y0 + 10.0
-    while y_cursor + h_needed < lane.y1 - 10.0:
-        cand = build_at_y(y_cursor + h_needed / 2.0)
-        if allowed(cand):
-            return cand, wrapped, fs
-        y_cursor += (h_needed + GAP_BETWEEN_CALLOUTS)
-
-    # Absolute last resort: return something in lane (may overlap callouts if impossible)
-    return build_at_y(min(max(target_y, lane.y0 + 20), lane.y1 - 20)), wrapped, fs
+def _closest_target_edge_point(target: fitz.Rect, source: fitz.Point) -> fitz.Point:
+    edges = [
+        fitz.Point(target.x0, max(min(source.y, target.y1 - 1), target.y0 + 1)),
+        fitz.Point(target.x1, max(min(source.y, target.y1 - 1), target.y0 + 1)),
+        fitz.Point(max(min(source.x, target.x1 - 1), target.x0 + 1), target.y0),
+        fitz.Point(max(min(source.x, target.x1 - 1), target.x0 + 1), target.y1),
+    ]
+    def dist(p):
+        return math.hypot(p.x - source.x, p.y - source.y)
+    return min(edges, key=dist)
 
 
 # ============================================================
-# Connectors that NEVER go through callout boxes
+# Connector routing with forks and no red-box crossings
 # ============================================================
-
-def _callout_edge_point_toward_gutter(callout: fitz.Rect, gutter_x: float) -> fitz.Point:
-    cy = (callout.y0 + callout.y1) / 2.0
-    if gutter_x < callout.x0:
-        return fitz.Point(callout.x0, min(max(cy, callout.y0 + 1), callout.y1 - 1))
-    else:
-        return fitz.Point(callout.x1, min(max(cy, callout.y0 + 1), callout.y1 - 1))
-
-
-def _target_edge_point_toward_gutter(target: fitz.Rect, gutter_x: float, desired_y: float) -> fitz.Point:
-    y = min(max(desired_y, target.y0 + 1), target.y1 - 1)
-    if gutter_x < target.x0:
-        end_raw = fitz.Point(target.x0, y)
-    else:
-        end_raw = fitz.Point(target.x1, y)
-    return end_raw
-
 
 def _route_connector_no_callout_crossing(
     page: fitz.Page,
     callout: fitz.Rect,
     target: fitz.Rect,
     callout_blocks: List[fitz.Rect],
-    highlight_rects: List[fitz.Rect],   # <-- NEW: all red-box rects on page 1
+    highlight_rects: List[fitz.Rect],
 ) -> List[fitz.Point]:
-    """
-    Route: callout edge -> gutter -> (optionally dogleg) -> target edge.
-    Goal:
-      - NEVER go through callout boxes
-      - MINIMISE going through highlight boxes (red boxes)
-      - Connect into the target box edge (right edge when coming from right gutter)
-    """
     pr = page.rect
 
     def count_hits(a: fitz.Point, b: fitz.Point, rects: List[fitz.Rect]) -> int:
@@ -598,8 +522,6 @@ def _route_connector_no_callout_crossing(
     ordered_gutters = [preferred] + [g for g in gutters if g != preferred]
 
     tc = _center(target)
-
-    # y candidates: center, then just above / just below the target box, then wider
     y_candidates = [
         tc.y,
         target.y0 - 6, target.y1 + 6,
@@ -613,29 +535,22 @@ def _route_connector_no_callout_crossing(
     best_score = float("inf")
 
     for gx in ordered_gutters:
-        start = _callout_edge_point_toward_gutter(callout, gx)
+        start = _closest_edge_point(callout, target)
         p_gutter_start = fitz.Point(gx, start.y)
 
         for y in y_candidates:
-            # gutter vertical landing point
             p_gutter_mid = fitz.Point(gx, y)
 
-            # Approach point just OUTSIDE the target edge on the gutter side
-            # so the long horizontal segment doesn't plough through other highlights.
             if gx > target.x1:
                 approach = fitz.Point(target.x1 + 3, y)
-                end_raw = fitz.Point(target.x1, min(max(y, target.y0 + 1), target.y1 - 1))
+                end_raw = fitz.Point(target.x1, max(min(y, target.y1 - 1), target.y0 + 1))
             else:
                 approach = fitz.Point(target.x0 - 3, y)
-                end_raw = fitz.Point(target.x0, min(max(y, target.y0 + 1), target.y1 - 1))
+                end_raw = fitz.Point(target.x0, max(min(y, target.y1 - 1), target.y0 + 1))
 
             end = _pull_back_point(approach, end_raw, ENDPOINT_PULLBACK)
-
-            # Candidate polyline:
-            # callout -> gutter start -> gutter mid -> approach (outside target) -> end (into target)
             pts = [start, p_gutter_start, p_gutter_mid, approach, end]
 
-            # 1) HARD constraint: must not intersect callout boxes
             hard_ok = True
             for a, b in zip(pts, pts[1:]):
                 for br in callout_blocks:
@@ -647,7 +562,6 @@ def _route_connector_no_callout_crossing(
             if not hard_ok:
                 continue
 
-            # 2) Soft scoring: minimise highlight crossings (excluding the target itself)
             other_highlights = [r for r in highlight_rects if not r.intersects(target)]
             soft_hits = 0
             length = 0.0
@@ -660,22 +574,21 @@ def _route_connector_no_callout_crossing(
                 best_score = score
                 best_pts = pts
 
-            # If we found a route with 0 soft hits, take it immediately
             if soft_hits == 0:
                 return pts
 
-    # If all else fails, return the least-bad candidate; else fall back to direct
     if best_pts is not None:
         return best_pts
 
-    start = fitz.Point(callout.x1, (callout.y0 + callout.y1) / 2.0)
-    end_raw = fitz.Point(target.x0, (target.y0 + target.y1) / 2.0)
+    # Fallback
+    start = _closest_edge_point(callout, target)
+    end_raw = _closest_target_edge_point(target, start)
     end = _pull_back_point(start, end_raw, ENDPOINT_PULLBACK)
     return [start, end]
 
 
 # ============================================================
-# Multi-page routing (kept simple; stays in gutter)
+# Multi-page connector
 # ============================================================
 
 def _draw_multipage_connector(
@@ -692,7 +605,7 @@ def _draw_multipage_connector(
     gutter_side = "right" if callout_c.x >= pr.width / 2 else "left"
     gutter_x = pr.width - EDGE_PAD if gutter_side == "right" else EDGE_PAD
 
-    start = _callout_edge_point_toward_gutter(callout_rect, gutter_x)
+    start = _closest_edge_point(callout_rect, target_rect)
     p_gutter_start = fitz.Point(gutter_x, min(max(start.y, EDGE_PAD), pr.height - EDGE_PAD))
     p_gutter_bottom = fitz.Point(gutter_x, pr.height - EDGE_PAD)
 
@@ -714,7 +627,7 @@ def _draw_multipage_connector(
     p_top = fitz.Point(gx_t, EDGE_PAD)
     p_mid = fitz.Point(gx_t, y_target)
 
-    end_raw = _target_edge_point_toward_gutter(target_rect, gx_t, y_target)
+    end_raw = _closest_target_edge_point(target_rect, p_mid)
     end = _pull_back_point(p_mid, end_raw, ENDPOINT_PULLBACK)
 
     _draw_line(tp, p_top, p_mid)
@@ -777,7 +690,7 @@ def annotate_pdf_bytes(
     footer_no_go_p1 = fitz.Rect(NO_GO_RECT) & pr1
 
     # ------------------------------------------------------------
-    # 1) Highlights for quotes (URLs restricted to page 1 as before)
+    # 1) Highlights for quotes (URLs restricted to page 1)
     # ------------------------------------------------------------
     meta_url = (meta.get("source_url") or "").strip()
     for page in doc:
@@ -794,7 +707,7 @@ def annotate_pdf_bytes(
                 total_quote_hits += 1
 
     # ------------------------------------------------------------
-    # 2) Metadata search + callouts (deterministic side)
+    # 2) Metadata search + callouts
     # ------------------------------------------------------------
     def _find_targets_across_doc(needle: str, *, page_indices: Optional[List[int]] = None) -> List[Tuple[int, fitz.Rect]]:
         out = []
@@ -818,7 +731,6 @@ def annotate_pdf_bytes(
         if not targets_by_page:
             return
 
-        # Choose targets to anchor placement (prefer page 1, else first page found)
         if 0 in targets_by_page:
             anchor_targets = targets_by_page[0]
         else:
@@ -844,7 +756,6 @@ def annotate_pdf_bytes(
             label=label,
         )
 
-        # Hard footer adjustment (keep callouts out of footer no-go)
         if footer_no_go_p1.width > 0 and footer_no_go_p1.height > 0 and crect.intersects(footer_no_go_p1):
             shift = (crect.y1 - footer_no_go_p1.y0) + EDGE_PAD
             crect = fitz.Rect(crect.x0, crect.y0 - shift, crect.x1, crect.y1 - shift)
@@ -853,11 +764,9 @@ def annotate_pdf_bytes(
         if not _rect_is_valid(crect):
             return
 
-        # Draw white background and red text
         page1.draw_rect(crect, color=WHITE, fill=WHITE, overlay=True)
         final_r, _, _ = _insert_textbox_fit(page1, crect, wtext, fontname=FONTNAME, fontsize=fs, color=RED)
 
-        # Register occupancy
         if side == "left":
             occupied_left.append(final_r)
         else:
@@ -878,7 +787,7 @@ def annotate_pdf_bytes(
             return
 
         is_url = _looks_like_url(val_str) or (meta_url and _is_same_urlish(val_str, meta_url))
-        indices = [0] if is_url else None  # URL only on page 1
+        indices = [0] if is_url else None
 
         needles = list(dict.fromkeys([val_str] + (variants or [])))
         targets_by_page: Dict[int, List[fitz.Rect]] = {}
@@ -890,14 +799,12 @@ def annotate_pdf_bytes(
         if not targets_by_page:
             return
 
-        # Draw red boxes for all matches found (URL is effectively only footer in your export)
         for pi, rects in targets_by_page.items():
             p = doc.load_page(pi)
             for r in _dedupe_rects(rects):
                 p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_meta_hits += 1
 
-        # Callout placement: URL only on page 1; others across doc
         if is_url:
             targets_by_page = {0: targets_by_page.get(0, [])}
             if not targets_by_page[0]:
@@ -912,7 +819,7 @@ def annotate_pdf_bytes(
     _do_job("Beneficiary lead role evidence.", meta.get("beneficiary_name"), meta.get("beneficiary_variants"))
 
     # ------------------------------------------------------------
-    # 3) Stars Logic (right side by rule)
+    # 3) Stars Logic
     # ------------------------------------------------------------
     if criterion_id in _STAR_CRITERIA:
         stars_map: Dict[int, List[fitz.Rect]] = {}
@@ -932,7 +839,7 @@ def annotate_pdf_bytes(
             )
 
     # ------------------------------------------------------------
-    # 4) Draw Connectors (allowed across body text, forbidden through callouts)
+    # 4) Draw Connectors
     # ------------------------------------------------------------
     callout_blocks = [inflate_rect(c, GAP_BETWEEN_CALLOUTS / 2.0) for c in all_callouts]
 
@@ -941,7 +848,7 @@ def annotate_pdf_bytes(
         for pi, rects in item["targets_by_page"].items():
             for r in _dedupe_rects(rects):
                 if pi == 0:
-                    pts = _route_connector_no_callout_crossing(page1, fr, r, callout_blocks)
+                    pts = _route_connector_no_callout_crossing(page1, fr, r, callout_blocks, highlight_rects=[])
                     _draw_poly_connector(page1, pts)
                 else:
                     _draw_multipage_connector(doc, 0, fr, pi, r)
