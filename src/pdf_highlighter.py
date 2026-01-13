@@ -89,7 +89,7 @@ def _segment_hits_rect(p1: fitz.Point, p2: fitz.Point, r: fitz.Rect, steps: int 
         t = i / steps
         x = p1.x + (p2.x - p1.x) * t
         y = p1.y + (p2.y - p1.y) * t
-        if r.contains(fitz.Point(x, y)):
+        if r.intersects(fitz.Rect(x-0.5, y-0.5, x+0.5, y+0.5)):
             return True
     return False
 
@@ -817,15 +817,19 @@ def annotate_pdf_bytes(
         page1.draw_rect(crect, color=WHITE, fill=WHITE, overlay=True)
         final_r, _, _ = _insert_textbox_fit(page1, crect, wtext, fontname=FONTNAME, fontsize=fs, color=RED)
 
+        callout_block = crect | final_r   # union of background + fitted text
+
         if side == "left":
             occupied_left.append(final_r)
         else:
             occupied_right.append(final_r)
 
-        all_callouts.append(final_r)
-
+        callout_block = crect | final_r
+        all_callouts.append(callout_block)
+        
         connectors_to_draw.append({
-            "final_rect": final_r,
+            "final_rect": final_r,          # still draw from the actual box/text rect if you want
+            "callout_block": callout_block, # for collision avoidance
             "targets_by_page": targets_by_page,
             "label": label,
             "preferred_rect_p1": preferred_rect_p1,
