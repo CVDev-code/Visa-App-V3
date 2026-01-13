@@ -84,7 +84,12 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
-def _segment_hits_rect(p1: fitz.Point, p2: fitz.Point, r: fitz.Rect, steps: int = 90) -> bool:
+def _segment_hits_rect(p1: fitz.Point, p2: fitz.Point, r: fitz.Rect) -> bool:
+    seg_rect = fitz.Rect(min(p1.x, p2.x), min(p1.y, p2.y), max(p1.x, p2.x), max(p1.y, p2.y))
+    if not seg_rect.intersects(r):
+        return False
+    dist = math.hypot(p2.x - p1.x, p2.y - p1.y)
+    steps = max(100, int(dist * 2))
     for i in range(steps + 1):
         t = i / steps
         x = p1.x + (p2.x - p1.x) * t
@@ -550,8 +555,8 @@ def _route_connector_page1(
 
     # Start positions: top or bottom *outside* callout
     # outside by 2pt to avoid “edge equals inside” sampling issues
-    start_top_y = _clamp(callout.y0 - 2.0, EDGE_PAD, pr.height - EDGE_PAD)
-    start_bot_y = _clamp(callout.y1 + 2.0, EDGE_PAD, pr.height - EDGE_PAD)
+    start_top_y = _clamp(callout.y0 - 5.0, EDGE_PAD, pr.height - EDGE_PAD)
+    start_bot_y = _clamp(callout.y1 + 5.0, EDGE_PAD, pr.height - EDGE_PAD)
 
     if start_mode == "low":
         start_ys = [start_bot_y, start_top_y]
@@ -914,8 +919,8 @@ def annotate_pdf_bytes(
         label = item.get("label", "")
         preferred_rect_p1 = item.get("preferred_rect_p1")
 
-        # IMPORTANT: exclude *this* callout from the obstacle list
-        callout_blocks = [inflate_rect(c, GAP_BETWEEN_CALLOUTS / 2.0) for c in all_callouts if c is not fr]
+        # Treat all callouts (including this one) as hard obstacles for routing.
+        callout_blocks = [inflate_rect(c, 1.0) for c in all_callouts]
 
         for pi, rects in item["targets_by_page"].items():
             rr = _dedupe_rects(rects)
