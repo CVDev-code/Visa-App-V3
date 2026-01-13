@@ -1125,11 +1125,10 @@ def annotate_pdf_bytes(
                     targets = [pref] + [r for r in rr if r is not pref]
 
                 for r in targets:
-                    # Build hard obstacle list; include everything (including the source callout),
-                    # but we must NOT block the start point inside/near the callout.
-                    # We handle that by starting just outside the callout; keeping callout as obstacle
-                    # ensures the arrow never cuts across any callout rectangle.
+                    # Build hard obstacle list; exclude the source callout so the route can exit it,
+                    # but keep all other callouts blocked.
                     hard_obs = list(base_hard_obstacles_p1)
+                    hard_obs.extend([c for c in all_callouts if c is not fr])
 
                     pts = _route_connector_page1_astar(
                         page1,
@@ -1138,10 +1137,10 @@ def annotate_pdf_bytes(
                         hard_obstacles=hard_obs,
                         soft_rects=soft_rects_p1,
                     )
-                    _draw_poly_connector(page1, pts, overlay=True)  # arrows drawn first
+                    _draw_poly_connector(page1, pts, overlay=False)  # arrows drawn first
             else:
                 for r in rr:
-                    _draw_multipage_connector(doc, 0, fr, pi, r, overlay=True)
+                    _draw_multipage_connector(doc, 0, fr, pi, r, overlay=False)
 
     # ------------------------------------------------------------
     # 5) Draw callouts LAST (white box + text), so arrows never appear on top
