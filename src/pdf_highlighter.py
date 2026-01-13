@@ -663,11 +663,16 @@ def _place_annotation_in_margin(
                 continue
 
             conflicts = any(cand.intersects(o) for o in occupied_buf)
-            safe = not conflicts
+            connector_start, connector_end = _edge_to_edge_points(cand, target_union)
+            connector_conflict = any(
+                _segment_hits_rect(connector_start, connector_end, o) for o in occupied_buf
+            )
+            safe = not conflicts and not connector_conflict
 
             dx = abs(_center(cand).x - target_c.x)
             dy_zero_penalty = 5.0 if dy == 0 else 0.0
-            score = (0 if safe else 10_000) + dx * 0.8 + abs(dy) * 0.15 + dy_zero_penalty
+            line_penalty = 2_500 if connector_conflict else 0.0
+            score = (0 if safe else 10_000) + line_penalty + dx * 0.8 + abs(dy) * 0.15 + dy_zero_penalty
 
             if best is None or score < best[0]:
                 best = (score, cand, wrapped_text, fs, safe)
