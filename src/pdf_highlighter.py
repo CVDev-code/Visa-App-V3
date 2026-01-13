@@ -85,16 +85,18 @@ def _clamp(v: float, lo: float, hi: float) -> float:
 
 
 def _segment_hits_rect(p1: fitz.Point, p2: fitz.Point, r: fitz.Rect) -> bool:
-    seg_rect = fitz.Rect(min(p1.x, p2.x), min(p1.y, p2.y), max(p1.x, p2.x), max(p1.y, p2.y))
-    if not seg_rect.intersects(r):
-        return False
-    dist = math.hypot(p2.x - p1.x, p2.y - p1.y)
-    steps = max(100, int(dist * 2))
-    for i in range(steps + 1):
-        t = i / steps
-        x = p1.x + (p2.x - p1.x) * t
-        y = p1.y + (p2.y - p1.y) * t
-        if r.contains(fitz.Point(x, y)):
+    if r.contains(p1) or r.contains(p2):
+        return True
+
+    edges = [
+        (fitz.Point(r.x0, r.y0), fitz.Point(r.x1, r.y0)),
+        (fitz.Point(r.x1, r.y0), fitz.Point(r.x1, r.y1)),
+        (fitz.Point(r.x1, r.y1), fitz.Point(r.x0, r.y1)),
+        (fitz.Point(r.x0, r.y1), fitz.Point(r.x0, r.y0)),
+    ]
+
+    for e1, e2 in edges:
+        if fitz.intersect_segments(p1, p2, e1, e2):
             return True
     return False
 
