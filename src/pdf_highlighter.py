@@ -823,7 +823,7 @@ def annotate_pdf_bytes(
             occupied_right.append(final_r)
 
         all_callouts.append(final_r)
-        
+
         connectors_to_draw.append({
             "final_rect": final_r,
             "targets_by_page": targets_by_page,
@@ -911,7 +911,7 @@ def annotate_pdf_bytes(
         preferred_rect_p1 = item.get("preferred_rect_p1")
 
         # IMPORTANT: exclude *this* callout from the obstacle list
-        callout_blocks = [inflate_rect(c, GAP_BETWEEN_CALLOUTS / 2.0) for c in all_callouts]
+        callout_blocks = [inflate_rect(c, GAP_BETWEEN_CALLOUTS / 2.0) for c in all_callouts if c is not fr]
 
         for pi, rects in item["targets_by_page"].items():
             rr = _dedupe_rects(rects)
