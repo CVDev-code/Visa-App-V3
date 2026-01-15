@@ -1,7 +1,7 @@
 import io
 import math
 import re
-from typing import Dict, List, Tuple, Optional, Any, Iterable
+from typing import Dict, List, Tuple, Optional, Any
 
 import fitz  # PyMuPDF
 
@@ -65,10 +65,6 @@ def _center(rect: fitz.Rect) -> fitz.Point:
     return fitz.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
 
 
-def _clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
-
-
 def _rect_is_valid(r: fitz.Rect) -> bool:
     vals = [r.x0, r.y0, r.x1, r.y1]
     return (
@@ -116,27 +112,34 @@ def _detect_actual_text_area(page: fitz.Page) -> fitz.Rect:
         words = page.get_text("words") or []
         if not words:
             return _get_fallback_text_area(page)
+
         pr = page.rect
         header_limit = pr.height * 0.12
         footer_limit = pr.height * 0.88
+
         x0s, x1s = [], []
         for w in words:
             x0, y0, x1, y1, text = w[:5]
             if y0 > header_limit and y1 < footer_limit and len((text or "").strip()) > 1:
                 x0s.append(float(x0))
                 x1s.append(float(x1))
+
         if not x0s:
             return _get_fallback_text_area(page)
+
         x0s.sort()
         x1s.sort()
         li = int(len(x0s) * 0.05)
         ri = int(len(x1s) * 0.95)
         text_left = x0s[max(0, li)]
         text_right = x1s[min(len(x1s) - 1, ri)]
+
         text_left = max(pr.width * 0.08, text_left)
         text_right = min(pr.width * 0.92, text_right)
+
         if text_right <= text_left + 50:
             return _get_fallback_text_area(page)
+
         return fitz.Rect(text_left, header_limit, text_right, footer_limit)
     except Exception:
         return _get_fallback_text_area(page)
@@ -150,6 +153,7 @@ def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, 
     text = (text or "").strip()
     if not text:
         return 11, "", box_width, 24.0
+
     words = text.split()
     max_h = 220.0
 
@@ -217,6 +221,7 @@ def _insert_textbox_fit(
         fs -= 1
         r = _ensure_min_size(fitz.Rect(rect), pr)
         ret = attempt(r, fs)
+
         it = 0
         while ret < 0 and it < max_expand_iters:
             need = (-ret) + extra_pad_each_iter
@@ -226,6 +231,7 @@ def _insert_textbox_fit(
             r.y1 = min(pr.height - 2.0, r.y1)
             ret = attempt(r, fs)
             it += 1
+
         shrink_tries += 1
 
     return r, ret, fs
@@ -355,7 +361,7 @@ def _is_same_urlish(a: str, b: str) -> bool:
 
 
 # ============================================================
-# Margin lanes (equal width) — keep the same logic
+# Margin lanes (equal width)
 # ============================================================
 
 def _compute_equal_margins(page: fitz.Page) -> Tuple[fitz.Rect, fitz.Rect, fitz.Rect]:
@@ -456,6 +462,7 @@ def _place_callout_in_lane(
 
 _STAR_CRITERIA = {"3", "2_past", "4_past"}
 
+
 def _find_high_star_tokens(page: fitz.Page) -> List[str]:
     text = page.get_text("text") or ""
     tokens: List[str] = []
@@ -465,7 +472,7 @@ def _find_high_star_tokens(page: fitz.Page) -> List[str]:
         tok = m.group(0)
         if tok.count("★") >= 4:
             tokens.append(tok)
-    out = []
+    out: List[str] = []
     seen = set()
     for t in tokens:
         if t not in seen:
@@ -475,7 +482,7 @@ def _find_high_star_tokens(page: fitz.Page) -> List[str]:
 
 
 # ============================================================
-# Main entrypoint (NO CONNECTORS)
+# Main entrypoint (STRICTLY NO CONNECTORS)
 # ============================================================
 
 def annotate_pdf_bytes(
@@ -485,11 +492,10 @@ def annotate_pdf_bytes(
     meta: Dict,
 ) -> Tuple[bytes, Dict]:
     """
-    Pipeline (connector-free):
-      1) Detect text area (page 1) and compute equal margin lanes
-      2) Find hits (quotes + metadata + optional stars) and draw red boxes around hits
-      3) Place callout boxes in left/right lanes (avoids text area + highlights + footer no-go + other callouts)
-      4) Draw callout white boxes + red text (NO red connector lines/arrows)
+    Connector-free pipeline:
+      - Draw red rectangles around hits (quotes/meta/stars)
+      - Place margin callouts on page 1 (left/right lanes)
+      - Draw callout white boxes + red label text
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     if len(doc) == 0:
@@ -503,11 +509,8 @@ def annotate_pdf_bytes(
 
     occupied_left: List[fitz.Rect] = []
     occupied_right: List[fitz.Rect] = []
-
-    # Store callouts to draw at end (so they sit cleanly on top)
     callouts_to_draw: List[Dict[str, Any]] = []
 
-    # Detect margins/lanes
     text_area, left_lane, right_lane = _compute_equal_margins(page1)
     footer_no_go_p1 = fitz.Rect(NO_GO_RECT) & pr1
 
@@ -521,6 +524,7 @@ def annotate_pdf_bytes(
             t = (term or "").strip()
             if not t:
                 continue
+
             is_url_term = _looks_like_url(t) or (meta_url and _is_same_urlish(t, meta_url))
             if is_url_term and page.number != 0:
                 continue
@@ -554,13 +558,12 @@ def annotate_pdf_bytes(
         return out
 
     def _plan_callout(label: str, targets_by_page: Dict[int, List[fitz.Rect]]):
-        nonlocal occupied_left, occupied_right, callouts_to_draw
+        nonlocal callouts_to_draw, occupied_left, occupied_right
 
         if not targets_by_page:
             return
 
-        # Prefer anchoring callout placement on page 1 targets if present,
-        # otherwise use the first page where targets appear.
+        # Anchor callout placement on page 1 if possible
         if 0 in targets_by_page:
             anchor_targets = _dedupe_rects(targets_by_page[0])
         else:
@@ -585,7 +588,7 @@ def annotate_pdf_bytes(
             label=label,
         )
 
-        # Extra nudge if it still lands in footer no-go (belt + braces)
+        # Nudge upward if it intersects footer no-go
         if footer_no_go_p1.width > 0 and footer_no_go_p1.height > 0 and crect.intersects(footer_no_go_p1):
             shift = (crect.y1 - footer_no_go_p1.y0) + EDGE_PAD
             crect = fitz.Rect(crect.x0, crect.y0 - shift, crect.x1, crect.y1 - shift)
@@ -594,20 +597,14 @@ def annotate_pdf_bytes(
         if not _rect_is_valid(crect):
             return
 
-        # Reserve space so later callouts don't collide
         if side == "left":
             occupied_left.append(crect)
         else:
             occupied_right.append(crect)
 
-        # Draw later (on top)
-        callouts_to_draw.append({
-            "rect": crect,
-            "text": wtext,
-            "fontsize": fs,
-        })
+        callouts_to_draw.append({"rect": crect, "text": wtext, "fontsize": fs})
 
-    def _do_job(label: str, value: Optional[str], variants: List[str] = None):
+    def _do_job(label: str, value: Optional[str], variants: Optional[List[str]] = None):
         nonlocal total_meta_hits
 
         val_str = str(value or "").strip()
@@ -615,7 +612,7 @@ def annotate_pdf_bytes(
             return
 
         is_url = _looks_like_url(val_str) or (meta_url and _is_same_urlish(val_str, meta_url))
-        indices = [0] if is_url else None  # URL only on page 1
+        indices = [0] if is_url else None
 
         needles = list(dict.fromkeys([val_str] + (variants or [])))
         targets_by_page: Dict[int, List[fitz.Rect]] = {}
@@ -627,14 +624,13 @@ def annotate_pdf_bytes(
         if not targets_by_page:
             return
 
-        # Draw red boxes around all metadata hits (all pages found)
+        # Red boxes around all metadata hits
         for pi, rects in targets_by_page.items():
             p = doc.load_page(pi)
             for r in _dedupe_rects(rects):
                 p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_meta_hits += 1
 
-        # Plan (place) the callout once (anchored on page 1 when possible)
         if is_url:
             targets_by_page = {0: targets_by_page.get(0, [])}
             if not targets_by_page[0]:
@@ -646,7 +642,7 @@ def annotate_pdf_bytes(
     _do_job("Venue is distinguished organization.", meta.get("venue_name"))
     _do_job("Ensemble is distinguished organization.", meta.get("ensemble_name"))
     _do_job("Performance date.", meta.get("performance_date"))
-    _do_job("Beneficiary in lead role.", meta.get("beneficiary_name"), meta.get("beneficiary_variants"))
+    _do_job("Beneficiary lead role evidence.", meta.get("beneficiary_name"), meta.get("beneficiary_variants"))
 
     # ------------------------------------------------------------
     # 3) Stars (optional criterion)
@@ -663,23 +659,17 @@ def annotate_pdf_bytes(
                         total_quote_hits += 1
 
         if stars_map:
-            _plan_callout(
-                "Highly acclaimed review of the distinguished performance.",
-                stars_map
-            )
+            _plan_callout("Highly acclaimed review of the distinguished performance.", stars_map)
 
     # ------------------------------------------------------------
-    # 4) Draw callouts LAST (white box + red text)
+    # 4) Draw callouts LAST (white box + red text) — no lines/arrows exist anywhere
     # ------------------------------------------------------------
     for cd in callouts_to_draw:
         crect = cd["rect"]
         wtext = cd["text"]
         fs = cd["fontsize"]
 
-        # White background
         page1.draw_rect(crect, color=WHITE, fill=WHITE, overlay=True)
-
-        # Red text
         _insert_textbox_fit(
             page1,
             crect,
@@ -698,5 +688,5 @@ def annotate_pdf_bytes(
     return out.getvalue(), {
         "total_quote_hits": total_quote_hits,
         "total_meta_hits": total_meta_hits,
-        "criterion_id": criterion_id
+        "criterion_id": criterion_id,
     }
