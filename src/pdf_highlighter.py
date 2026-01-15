@@ -646,7 +646,7 @@ def annotate_pdf_bytes(
     _do_job("Venue is distinguished organization.", meta.get("venue_name"))
     _do_job("Ensemble is distinguished organization.", meta.get("ensemble_name"))
     _do_job("Performance date.", meta.get("performance_date"))
-    _do_job("Beneficiary lead role evidence.", meta.get("beneficiary_name"), meta.get("beneficiary_variants"))
+    _do_job("Beneficiary in lead role.", meta.get("beneficiary_name"), meta.get("beneficiary_variants"))
 
     # ------------------------------------------------------------
     # 3) Stars (optional criterion)
