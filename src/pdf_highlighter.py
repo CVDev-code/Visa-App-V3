@@ -1,7 +1,6 @@
 import io
 import math
 import re
-import heapq
 from typing import Dict, List, Tuple, Optional, Any, Iterable
 
 import fitz  # PyMuPDF
@@ -11,7 +10,6 @@ WHITE = (1, 1, 1)
 
 # ---- style knobs ----
 BOX_WIDTH = 1.7
-LINE_WIDTH = 1.6
 FONTNAME = "Times-Bold"
 FONT_SIZES = [11, 10, 9, 8]
 
@@ -22,11 +20,6 @@ NO_GO_RECT = fitz.Rect(21.00, 816.00, 411.26, 830.00)
 EDGE_PAD = 12.0
 GAP_FROM_HIGHLIGHTS = 10.0
 GAP_BETWEEN_CALLOUTS = 10.0
-ENDPOINT_PULLBACK = 1.5
-
-# Arrowhead
-ARROW_LEN = 9.0
-ARROW_HALF_WIDTH = 4.5
 
 # For quote search robustness
 _MAX_TERM = 600
@@ -44,12 +37,6 @@ SIDE_RIGHT_LABELS = {
     "Beneficiary lead role evidence.",
     "Highly acclaimed review of the distinguished performance.",
 }
-
-# ---- grid routing knobs ----
-GRID_STEP = 8.0              # coarse grid cell size (6–10pt recommended)
-HARD_INFLATE = (LINE_WIDTH / 2.0) + 2.0  # inflate hard obstacles so “touching” counts as collision
-TEXT_SOFT_PENALTY = 45.0     # extra cost per step for moving through text area
-TURN_PENALTY = 0.35          # tiny preference for fewer turns (optional)
 
 
 # ============================================================
@@ -76,16 +63,6 @@ def _union_rect(rects: List[fitz.Rect]) -> fitz.Rect:
 
 def _center(rect: fitz.Rect) -> fitz.Point:
     return fitz.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
-
-
-def _pull_back_point(from_pt: fitz.Point, to_pt: fitz.Point, dist: float) -> fitz.Point:
-    vx = from_pt.x - to_pt.x
-    vy = from_pt.y - to_pt.y
-    d = math.hypot(vx, vy)
-    if d == 0:
-        return to_pt
-    ux, uy = vx / d, vy / d
-    return fitz.Point(to_pt.x + ux * dist, to_pt.y + uy * dist)
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -123,47 +100,6 @@ def _ensure_min_size(
     if rr.x1 <= rr.x0 or rr.y1 <= rr.y0:
         rr = fitz.Rect(pad, pad, pad + min_w, pad + min_h)
     return rr
-
-
-# ============================================================
-# Robust segment vs rect intersection (touching counts)
-# Liang–Barsky line clipping
-# ============================================================
-
-def _segment_intersects_rect(p1: fitz.Point, p2: fitz.Point, r: fitz.Rect) -> bool:
-    # Returns True if segment intersects/touches the rect.
-    x0, y0, x1, y1 = r.x0, r.y0, r.x1, r.y1
-    dx = p2.x - p1.x
-    dy = p2.y - p1.y
-
-    p = [-dx, dx, -dy, dy]
-    q = [p1.x - x0, x1 - p1.x, p1.y - y0, y1 - p1.y]
-
-    u1, u2 = 0.0, 1.0
-    for pi, qi in zip(p, q):
-        if pi == 0:
-            if qi < 0:
-                return False
-        else:
-            t = qi / pi
-            if pi < 0:
-                if t > u2:
-                    return False
-                if t > u1:
-                    u1 = t
-            else:
-                if t < u1:
-                    return False
-                if t < u2:
-                    u2 = t
-    return True  # intersects or touches
-
-
-def _segment_hits_any(p1: fitz.Point, p2: fitz.Point, rects: Iterable[fitz.Rect]) -> bool:
-    for r in rects:
-        if _segment_intersects_rect(p1, p2, r):
-            return True
-    return False
 
 
 # ============================================================
@@ -419,39 +355,6 @@ def _is_same_urlish(a: str, b: str) -> bool:
 
 
 # ============================================================
-# Arrow drawing (same style)
-# ============================================================
-
-def _draw_arrowhead(page: fitz.Page, start: fitz.Point, end: fitz.Point, *, overlay: bool = True):
-    vx = end.x - start.x
-    vy = end.y - start.y
-    d = math.hypot(vx, vy)
-    if d == 0:
-        return
-    ux, uy = vx / d, vy / d
-    bx = end.x - ux * ARROW_LEN
-    by = end.y - uy * ARROW_LEN
-    px = -uy
-    py = ux
-    p1 = fitz.Point(bx + px * ARROW_HALF_WIDTH, by + py * ARROW_HALF_WIDTH)
-    p2 = fitz.Point(bx - px * ARROW_HALF_WIDTH, by - py * ARROW_HALF_WIDTH)
-    tip = fitz.Point(end.x, end.y)
-    page.draw_polyline([p1, tip, p2, p1], color=RED, fill=RED, width=0.0, overlay=overlay)
-
-
-def _draw_line(page: fitz.Page, a: fitz.Point, b: fitz.Point, *, overlay: bool = True):
-    page.draw_line(a, b, color=RED, width=LINE_WIDTH, overlay=overlay)
-
-
-def _draw_poly_connector(page: fitz.Page, pts: List[fitz.Point], *, overlay: bool = True):
-    if len(pts) < 2:
-        return
-    for a, b in zip(pts, pts[1:]):
-        _draw_line(page, a, b, overlay=overlay)
-    _draw_arrowhead(page, pts[-2], pts[-1], overlay=overlay)
-
-
-# ============================================================
 # Margin lanes (equal width) — keep the same logic
 # ============================================================
 
@@ -548,304 +451,6 @@ def _place_callout_in_lane(
 
 
 # ============================================================
-# Grid A* router (hard obstacles + soft text penalty)
-# ============================================================
-
-def _grid_build(
-    pr: fitz.Rect,
-    hard_obstacles: List[fitz.Rect],
-    soft_rects: List[fitz.Rect],
-    step: float,
-) -> Tuple[int, int, List[List[bool]], List[List[float]]]:
-    width = pr.width
-    height = pr.height
-    cols = max(1, int(math.ceil(width / step)))
-    rows = max(1, int(math.ceil(height / step)))
-
-    # Inflate hard obstacles so “touching” counts
-    hard_inf = [inflate_rect(r, HARD_INFLATE) for r in hard_obstacles]
-
-    blocked = [[False for _ in range(cols)] for _ in range(rows)]
-    soft_cost = [[0.0 for _ in range(cols)] for _ in range(rows)]
-
-    def cell_rect(i: int, j: int) -> fitz.Rect:
-        x0 = i * step
-        y0 = j * step
-        x1 = min(width, x0 + step)
-        y1 = min(height, y0 + step)
-        return fitz.Rect(x0, y0, x1, y1)
-
-    # Fill grid
-    for j in range(rows):
-        for i in range(cols):
-            cr = cell_rect(i, j)
-
-            # stay inside EDGE_PAD boundary (acts like a page frame)
-            if cr.x0 < EDGE_PAD or cr.y0 < EDGE_PAD or cr.x1 > (width - EDGE_PAD) or cr.y1 > (height - EDGE_PAD):
-                blocked[j][i] = True
-                continue
-
-            # hard obstacles
-            if any(cr.intersects(h) for h in hard_inf):
-                blocked[j][i] = True
-                continue
-
-            # soft obstacles (text area)
-            if any(cr.intersects(s) for s in soft_rects):
-                soft_cost[j][i] = TEXT_SOFT_PENALTY
-
-    return cols, rows, blocked, soft_cost
-
-
-def _point_to_cell(p: fitz.Point, pr: fitz.Rect, step: float, cols: int, rows: int) -> Tuple[int, int]:
-    x = _clamp(p.x, 0.0, pr.width - 1e-6)
-    y = _clamp(p.y, 0.0, pr.height - 1e-6)
-    i = int(x // step)
-    j = int(y // step)
-    i = max(0, min(cols - 1, i))
-    j = max(0, min(rows - 1, j))
-    return i, j
-
-
-def _cell_center(i: int, j: int, pr: fitz.Rect, step: float) -> fitz.Point:
-    cx = min(pr.width - 1e-6, (i * step) + (step / 2.0))
-    cy = min(pr.height - 1e-6, (j * step) + (step / 2.0))
-    return fitz.Point(cx, cy)
-
-
-def _astar_route(
-    pr: fitz.Rect,
-    start: fitz.Point,
-    goal: fitz.Point,
-    hard_obstacles: List[fitz.Rect],
-    soft_rects: List[fitz.Rect],
-    step: float = GRID_STEP,
-) -> List[fitz.Point]:
-    cols, rows, blocked, soft_cost = _grid_build(pr, hard_obstacles, soft_rects, step)
-
-    si, sj = _point_to_cell(start, pr, step, cols, rows)
-    gi, gj = _point_to_cell(goal, pr, step, cols, rows)
-
-    # If start/goal fall in blocked cells, nudge to nearest unblocked within a small radius
-    def nudge_to_free(i: int, j: int) -> Tuple[int, int]:
-        if 0 <= i < cols and 0 <= j < rows and not blocked[j][i]:
-            return i, j
-        for rad in range(1, 10):
-            for dj in range(-rad, rad + 1):
-                for di in range(-rad, rad + 1):
-                    ii, jj = i + di, j + dj
-                    if 0 <= ii < cols and 0 <= jj < rows and not blocked[jj][ii]:
-                        return ii, jj
-        return i, j
-
-    si, sj = nudge_to_free(si, sj)
-    gi, gj = nudge_to_free(gi, gj)
-
-    if blocked[sj][si] or blocked[gj][gi]:
-        return [start, goal]  # hard fallback
-
-    def h(i: int, j: int) -> float:
-        return math.hypot(i - gi, j - gj)
-
-    # 8-neighborhood
-    nbrs = [
-        (-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
-        (-1, -1, math.sqrt(2.0)), (1, -1, math.sqrt(2.0)),
-        (-1, 1, math.sqrt(2.0)), (1, 1, math.sqrt(2.0)),
-    ]
-
-    INF = 1e18
-    gscore = [[INF for _ in range(cols)] for _ in range(rows)]
-    parent: Dict[Tuple[int, int], Tuple[int, int]] = {}
-
-    # store prev direction for slight turn penalty
-    prevdir: Dict[Tuple[int, int], Tuple[int, int]] = {}
-
-    pq: List[Tuple[float, int, int]] = []
-    gscore[sj][si] = 0.0
-    heapq.heappush(pq, (h(si, sj), si, sj))
-
-    while pq:
-        f, i, j = heapq.heappop(pq)
-        if (i, j) == (gi, gj):
-            break
-
-        base = gscore[j][i]
-        cur_key = (i, j)
-        cur_dir = prevdir.get(cur_key)
-
-        for di, dj, w in nbrs:
-            ii, jj = i + di, j + dj
-            if not (0 <= ii < cols and 0 <= jj < rows):
-                continue
-            if blocked[jj][ii]:
-                continue
-
-            step_cost = w + soft_cost[jj][ii]
-            # tiny turn penalty
-            if cur_dir is not None and (di, dj) != cur_dir:
-                step_cost += TURN_PENALTY
-
-            ng = base + step_cost
-            if ng < gscore[jj][ii]:
-                gscore[jj][ii] = ng
-                parent[(ii, jj)] = (i, j)
-                prevdir[(ii, jj)] = (di, dj)
-                heapq.heappush(pq, (ng + h(ii, jj), ii, jj))
-
-    # reconstruct
-    cur = (gi, gj)
-    if cur not in parent and cur != (si, sj):
-        return [start, goal]  # fallback if no path found
-
-    path_cells = [cur]
-    while cur != (si, sj):
-        cur = parent[cur]
-        path_cells.append(cur)
-    path_cells.reverse()
-
-    pts = [_cell_center(i, j, pr, step) for (i, j) in path_cells]
-    pts[0] = start
-    pts[-1] = goal
-    return pts
-
-
-def _simplify_path(
-    pts: List[fitz.Point],
-    hard_obstacles: List[fitz.Rect],
-) -> List[fitz.Point]:
-    if len(pts) <= 2:
-        return pts
-
-    hard_inf = [inflate_rect(r, HARD_INFLATE) for r in hard_obstacles]
-
-    simplified = [pts[0]]
-    anchor_idx = 0
-    i = 2
-    while i < len(pts):
-        a = simplified[-1]
-        c = pts[i]
-        # if we can see c directly from a without hitting hard obstacles, keep stretching
-        if not _segment_hits_any(a, c, hard_inf):
-            i += 1
-            continue
-        # otherwise, lock in the previous point
-        simplified.append(pts[i - 1])
-        anchor_idx = i - 1
-        i = anchor_idx + 2
-
-    if simplified[-1] != pts[-1]:
-        simplified.append(pts[-1])
-
-    # remove near-duplicates / tiny segments
-    out = [simplified[0]]
-    for p in simplified[1:]:
-        if math.hypot(p.x - out[-1].x, p.y - out[-1].y) >= 1.0:
-            out.append(p)
-    if len(out) == 1:
-        out.append(pts[-1])
-    return out
-
-
-def _route_connector_page1_astar(
-    page: fitz.Page,
-    callout: fitz.Rect,
-    target: fitz.Rect,
-    *,
-    hard_obstacles: List[fitz.Rect],
-    soft_rects: List[fitz.Rect],
-) -> List[fitz.Point]:
-    pr = page.rect
-    cc = _center(callout)
-
-    # start just outside the callout, from the edge facing the text area
-    # (left-lane callout -> exit from right edge; right-lane callout -> exit from left edge)
-    if cc.x < pr.width / 2:
-        start = fitz.Point(_clamp(callout.x1 + 2.0, EDGE_PAD, pr.width - EDGE_PAD), _clamp(cc.y, EDGE_PAD, pr.height - EDGE_PAD))
-    else:
-        start = fitz.Point(_clamp(callout.x0 - 2.0, EDGE_PAD, pr.width - EDGE_PAD), _clamp(cc.y, EDGE_PAD, pr.height - EDGE_PAD))
-
-    # end on the target edge facing the callout side, pulled back so arrowhead doesn't sit on the box
-    tc = _center(target)
-    if cc.x < pr.width / 2:
-        end_raw = fitz.Point(target.x0, _clamp(tc.y, target.y0 + 1.0, target.y1 - 1.0))
-        approach = fitz.Point(target.x0 - 3.0, end_raw.y)
-    else:
-        end_raw = fitz.Point(target.x1, _clamp(tc.y, target.y0 + 1.0, target.y1 - 1.0))
-        approach = fitz.Point(target.x1 + 3.0, end_raw.y)
-
-    end = _pull_back_point(approach, end_raw, ENDPOINT_PULLBACK)
-
-    # Route on grid then simplify
-    grid_pts = _astar_route(pr, start, end, hard_obstacles, soft_rects, step=GRID_STEP)
-    simp = _simplify_path(grid_pts, hard_obstacles)
-
-    # Safety: ensure simplified segments still don't hit hard obstacles (rare edge)
-    hard_inf = [inflate_rect(r, HARD_INFLATE) for r in hard_obstacles]
-    for a, b in zip(simp, simp[1:]):
-        if _segment_hits_any(a, b, hard_inf):
-            return grid_pts  # fall back to unsimplified
-
-    return simp
-
-
-# ============================================================
-# Multi-page connector (unchanged gutter routing)
-# ============================================================
-
-def _draw_multipage_connector(
-    doc: fitz.Document,
-    callout_page_index: int,
-    callout_rect: fitz.Rect,
-    target_page_index: int,
-    target_rect: fitz.Rect,
-    *,
-    overlay: bool = True,
-):
-    callout_page = doc.load_page(callout_page_index)
-    pr = callout_page.rect
-
-    # pick gutter by callout position
-    cc = _center(callout_rect)
-    gx = pr.width - EDGE_PAD if cc.x >= pr.width / 2 else EDGE_PAD
-
-    # start outside callout (bottom)
-    start_x = callout_rect.x1 if gx > pr.width / 2 else callout_rect.x0
-    start = fitz.Point(start_x, _clamp(callout_rect.y1 + 2.0, EDGE_PAD, pr.height - EDGE_PAD))
-    p_gutter_start = fitz.Point(gx, start.y)
-    p_gutter_bottom = fitz.Point(gx, pr.height - EDGE_PAD)
-
-    _draw_line(callout_page, start, p_gutter_start, overlay=overlay)
-    _draw_line(callout_page, p_gutter_start, p_gutter_bottom, overlay=overlay)
-
-    for pi in range(callout_page_index + 1, target_page_index):
-        p = doc.load_page(pi)
-        pr_i = p.rect
-        gx_i = pr_i.width - EDGE_PAD if gx > pr.width / 2 else EDGE_PAD
-        _draw_line(p, fitz.Point(gx_i, EDGE_PAD), fitz.Point(gx_i, pr_i.height - EDGE_PAD), overlay=overlay)
-
-    tp = doc.load_page(target_page_index)
-    pr_t = tp.rect
-    gx_t = pr_t.width - EDGE_PAD if gx > pr.width / 2 else EDGE_PAD
-    tc = _center(target_rect)
-    y_target = _clamp(tc.y, EDGE_PAD, pr_t.height - EDGE_PAD)
-
-    p_top = fitz.Point(gx_t, EDGE_PAD)
-    p_mid = fitz.Point(gx_t, y_target)
-
-    if gx_t > target_rect.x1:
-        end_raw = fitz.Point(target_rect.x1, _clamp(y_target, target_rect.y0 + 1, target_rect.y1 - 1))
-    else:
-        end_raw = fitz.Point(target_rect.x0, _clamp(y_target, target_rect.y0 + 1, target_rect.y1 - 1))
-
-    end = _pull_back_point(p_mid, end_raw, ENDPOINT_PULLBACK)
-
-    _draw_line(tp, p_top, p_mid, overlay=overlay)
-    _draw_line(tp, p_mid, end, overlay=overlay)
-    _draw_arrowhead(tp, p_mid, end, overlay=overlay)
-
-
-# ============================================================
 # Stars helper
 # ============================================================
 
@@ -870,7 +475,7 @@ def _find_high_star_tokens(page: fitz.Page) -> List[str]:
 
 
 # ============================================================
-# Main entrypoint
+# Main entrypoint (NO CONNECTORS)
 # ============================================================
 
 def annotate_pdf_bytes(
@@ -880,14 +485,11 @@ def annotate_pdf_bytes(
     meta: Dict,
 ) -> Tuple[bytes, Dict]:
     """
-    Pipeline (amended):
-      1) Detect text area
-      2) Find hits and draw red boxes (obstacles)
-      3) Define gutters/lanes + footer no-go (hard)
-      4) Place callout rects in gutter (geometry constraints), BUT delay drawing
-      5) Route all arrows with A* (hard obstacles = callouts + red boxes + no-go; soft = text area)
-      6) Draw arrows first
-      7) Draw callout white boxes + text last (so arrows never appear over callouts)
+    Pipeline (connector-free):
+      1) Detect text area (page 1) and compute equal margin lanes
+      2) Find hits (quotes + metadata + optional stars) and draw red boxes around hits
+      3) Place callout boxes in left/right lanes (avoids text area + highlights + footer no-go + other callouts)
+      4) Draw callout white boxes + red text (NO red connector lines/arrows)
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     if len(doc) == 0:
@@ -901,26 +503,19 @@ def annotate_pdf_bytes(
 
     occupied_left: List[fitz.Rect] = []
     occupied_right: List[fitz.Rect] = []
-    all_callouts: List[fitz.Rect] = []
 
-    # Store callouts to draw later (after arrows)
+    # Store callouts to draw at end (so they sit cleanly on top)
     callouts_to_draw: List[Dict[str, Any]] = []
 
-    # Store connector jobs; each job can create multiple arrows (one per red box on page 1)
-    connectors_to_route: List[Dict[str, Any]] = []
-
-    # Detect margins/lanes (keep same space/coords logic)
+    # Detect margins/lanes
     text_area, left_lane, right_lane = _compute_equal_margins(page1)
     footer_no_go_p1 = fitz.Rect(NO_GO_RECT) & pr1
 
-    # Collect all red-box rectangles on page 1 (hard obstacles for arrows)
-    page1_redboxes: List[fitz.Rect] = []
+    meta_url = (meta.get("source_url") or "").strip()
 
     # ------------------------------------------------------------
     # 1) Quote highlights (URL-like quote terms restricted to page 1)
     # ------------------------------------------------------------
-    meta_url = (meta.get("source_url") or "").strip()
-
     for page in doc:
         for term in (quote_terms or []):
             t = (term or "").strip()
@@ -934,14 +529,16 @@ def annotate_pdf_bytes(
             for r in _dedupe_rects(rects):
                 page.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_quote_hits += 1
-                if page.number == 0:
-                    page1_redboxes.append(r)
 
     # ------------------------------------------------------------
-    # 2) Metadata hits + callout planning (place callouts now, draw later)
+    # 2) Metadata hits + callout planning
     # ------------------------------------------------------------
-    def _find_targets_across_doc(needle: str, *, page_indices: Optional[List[int]] = None) -> List[Tuple[int, fitz.Rect]]:
-        out = []
+    def _find_targets_across_doc(
+        needle: str,
+        *,
+        page_indices: Optional[List[int]] = None
+    ) -> List[Tuple[int, fitz.Rect]]:
+        out: List[Tuple[int, fitz.Rect]] = []
         needle = (needle or "").strip()
         if not needle:
             return out
@@ -956,16 +553,14 @@ def annotate_pdf_bytes(
                 out.append((pi, r))
         return out
 
-    def _plan_and_register_callout(
-        label: str,
-        targets_by_page: Dict[int, List[fitz.Rect]],
-        preferred_rect_p1: Optional[fitz.Rect] = None,
-    ):
-        nonlocal occupied_left, occupied_right, all_callouts, callouts_to_draw, connectors_to_route
+    def _plan_callout(label: str, targets_by_page: Dict[int, List[fitz.Rect]]):
+        nonlocal occupied_left, occupied_right, callouts_to_draw
 
         if not targets_by_page:
             return
 
+        # Prefer anchoring callout placement on page 1 targets if present,
+        # otherwise use the first page where targets appear.
         if 0 in targets_by_page:
             anchor_targets = _dedupe_rects(targets_by_page[0])
         else:
@@ -976,6 +571,7 @@ def annotate_pdf_bytes(
             return
 
         target_union = _union_rect(anchor_targets)
+
         side = _choose_side_for_label(label)
         lane = left_lane if side == "left" else right_lane
         occupied = occupied_left if side == "left" else occupied_right
@@ -989,6 +585,7 @@ def annotate_pdf_bytes(
             label=label,
         )
 
+        # Extra nudge if it still lands in footer no-go (belt + braces)
         if footer_no_go_p1.width > 0 and footer_no_go_p1.height > 0 and crect.intersects(footer_no_go_p1):
             shift = (crect.y1 - footer_no_go_p1.y0) + EDGE_PAD
             crect = fitz.Rect(crect.x0, crect.y0 - shift, crect.x1, crect.y1 - shift)
@@ -997,27 +594,17 @@ def annotate_pdf_bytes(
         if not _rect_is_valid(crect):
             return
 
-        # Reserve space (so future callouts avoid this)
+        # Reserve space so later callouts don't collide
         if side == "left":
             occupied_left.append(crect)
         else:
             occupied_right.append(crect)
 
-        all_callouts.append(crect)
-
-        # Store for later drawing (after arrows)
+        # Draw later (on top)
         callouts_to_draw.append({
             "rect": crect,
             "text": wtext,
             "fontsize": fs,
-        })
-
-        # Store routing jobs (can generate multiple arrows)
-        connectors_to_route.append({
-            "callout_rect": crect,
-            "targets_by_page": targets_by_page,
-            "label": label,
-            "preferred_rect_p1": preferred_rect_p1,
         })
 
     def _do_job(label: str, value: Optional[str], variants: List[str] = None):
@@ -1040,26 +627,20 @@ def annotate_pdf_bytes(
         if not targets_by_page:
             return
 
+        # Draw red boxes around all metadata hits (all pages found)
         for pi, rects in targets_by_page.items():
             p = doc.load_page(pi)
             for r in _dedupe_rects(rects):
                 p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_meta_hits += 1
-                if pi == 0:
-                    page1_redboxes.append(r)
 
+        # Plan (place) the callout once (anchored on page 1 when possible)
         if is_url:
             targets_by_page = {0: targets_by_page.get(0, [])}
             if not targets_by_page[0]:
                 return
 
-        preferred_rect_p1 = None
-        if label == "Beneficiary lead role evidence." and 0 in targets_by_page:
-            rr = _dedupe_rects(targets_by_page[0])
-            if rr:
-                preferred_rect_p1 = min(rr, key=lambda x: (x.x0, x.y0))
-
-        _plan_and_register_callout(label, targets_by_page, preferred_rect_p1=preferred_rect_p1)
+        _plan_callout(label, targets_by_page)
 
     _do_job("Original source of publication.", meta.get("source_url"))
     _do_job("Venue is distinguished organization.", meta.get("venue_name"))
@@ -1068,7 +649,7 @@ def annotate_pdf_bytes(
     _do_job("Beneficiary lead role evidence.", meta.get("beneficiary_name"), meta.get("beneficiary_variants"))
 
     # ------------------------------------------------------------
-    # 3) Stars
+    # 3) Stars (optional criterion)
     # ------------------------------------------------------------
     if criterion_id in _STAR_CRITERIA:
         stars_map: Dict[int, List[fitz.Rect]] = {}
@@ -1080,80 +661,25 @@ def annotate_pdf_bytes(
                     for r in _dedupe_rects(found):
                         p.draw_rect(r, color=RED, width=BOX_WIDTH)
                         total_quote_hits += 1
-                        if p.number == 0:
-                            page1_redboxes.append(r)
 
         if stars_map:
-            _plan_and_register_callout(
+            _plan_callout(
                 "Highly acclaimed review of the distinguished performance.",
                 stars_map
             )
 
     # ------------------------------------------------------------
-    # 4) Route + draw connectors FIRST
-    #     Hard obstacles: callouts + footer no-go + red boxes
-    #     Soft obstacles: text area (penalty)
-    # ------------------------------------------------------------
-    page1_redboxes_deduped = _dedupe_rects(page1_redboxes, pad=0.5)
-
-    # Fixed hard obstacles on page 1
-    base_hard_obstacles_p1: List[fitz.Rect] = []
-    if footer_no_go_p1.width > 0 and footer_no_go_p1.height > 0:
-        base_hard_obstacles_p1.append(footer_no_go_p1)
-    base_hard_obstacles_p1.extend(page1_redboxes_deduped)
-    base_hard_obstacles_p1.extend(all_callouts)
-
-    # Soft rects (text area)
-    soft_rects_p1 = [fitz.Rect(text_area)]
-
-    for item in connectors_to_route:
-        fr = item["callout_rect"]
-        preferred_rect_p1 = item.get("preferred_rect_p1")
-
-        for pi, rects in item["targets_by_page"].items():
-            rr = _dedupe_rects(rects)
-            if not rr:
-                continue
-
-            if pi == 0:
-                # Allow multiple arrows: connect ALL red boxes on page 1 for this label,
-                # unless a preferred is supplied (in which case include it first but still draw all)
-                targets = rr
-                if preferred_rect_p1 is not None:
-                    # Put preferred first, but keep the rest too
-                    pref = preferred_rect_p1
-                    targets = [pref] + [r for r in rr if r is not pref]
-
-                for r in targets:
-                    # Build hard obstacle list; exclude the source callout so the route can exit it,
-                    # but keep all other callouts blocked.
-                    hard_obs = list(base_hard_obstacles_p1)
-                    hard_obs.extend([c for c in all_callouts if c is not fr])
-
-                    pts = _route_connector_page1_astar(
-                        page1,
-                        callout=fr,
-                        target=r,
-                        hard_obstacles=hard_obs,
-                        soft_rects=soft_rects_p1,
-                    )
-                    _draw_poly_connector(page1, pts, overlay=True)  # arrows drawn first
-            else:
-                for r in rr:
-                    _draw_multipage_connector(doc, 0, fr, pi, r, overlay=True)
-
-    # ------------------------------------------------------------
-    # 5) Draw callouts LAST (white box + text), so arrows never appear on top
+    # 4) Draw callouts LAST (white box + red text)
     # ------------------------------------------------------------
     for cd in callouts_to_draw:
         crect = cd["rect"]
         wtext = cd["text"]
         fs = cd["fontsize"]
 
-        # Cover underlying arrows
+        # White background
         page1.draw_rect(crect, color=WHITE, fill=WHITE, overlay=True)
 
-        # Then draw the text (same font/size logic)
+        # Red text
         _insert_textbox_fit(
             page1,
             crect,
