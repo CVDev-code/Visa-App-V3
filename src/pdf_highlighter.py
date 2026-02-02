@@ -1,26 +1,8 @@
-"""
-Auto-callout + leader routing PDF annotator (PyMuPDF)
-
-What this version adds vs your current code:
-- Margin callouts are still placed in left/right lanes, but now:
-  1) Side is chosen by a cost function (distance + crossings + overlap), not by fixed labels.
-  2) Callouts are vertically aligned to the anchor target cluster.
-  3) Leader lines (with arrowheads) are drawn from the callout to a single anchor rect,
-     routed “margin-first” (2–3 segment polyline) to avoid crossing content.
-- Still connector-free (bytes in -> bytes out).
-
-Notes / assumptions:
-- “Keep-out” zones are text blocks + images from the PDF (so leaders avoid crossing readable content).
-- Each callout connects to ONE anchor rect even if multiple highlights exist for that label.
-- You can keep your deterministic side sets if you want; this implementation supports an optional
-  preferred_side but will override if the cost is much better on the other side.
-"""
-
 import io
 import math
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional, Any, Iterable
+from typing import Dict, List, Tuple, Optional, Any
 
 import fitz  # PyMuPDF
 
@@ -113,6 +95,54 @@ def _clamp(v: float, lo: float, hi: float) -> float:
 
 def _dist(a: fitz.Point, b: fitz.Point) -> float:
     return math.hypot(a.x - b.x, a.y - b.y)
+
+# ============================================================
+# ZONES + BEST-OCCURRENCE SCORING (NEW)
+# ============================================================
+
+def _zones(page: fitz.Page) -> Tuple[fitz.Rect, fitz.Rect]:
+    pr = page.rect
+    header = fitz.Rect(0, 0, pr.width, pr.height * 0.18)
+    footer = fitz.Rect(0, pr.height * 0.86, pr.width, pr.height)
+    return header, footer
+
+def _score_hit(page: fitz.Page, r: fitz.Rect, kind: str) -> float:
+    """
+    Higher = better.
+    kind: "url" | "entity" | "date" | "generic"
+    """
+    header, footer = _zones(page)
+    footer_no_go = (fitz.Rect(NO_GO_RECT) & page.rect)
+    c = _center(r)
+
+    score = 0.0
+
+    # Strong preference for header occurrences (matches your manual behavior)
+    if header.intersects(r):
+        score += 120.0
+        # extra boost if nearer the very top
+        score += 30.0 * (1.0 - (c.y / max(1.0, header.y1)))
+
+    # Strong penalty for footer / print URL area
+    if footer.intersects(r) or (footer_no_go.width > 0 and footer_no_go.height > 0 and footer_no_go.intersects(r)):
+        score -= 250.0
+
+    # Mild preference for earlier occurrence
+    score += max(0.0, 25.0 - (c.y / page.rect.height) * 25.0)
+
+    # Kind-specific tuning
+    if kind == "url":
+        score += 20.0
+    elif kind in ("entity", "date"):
+        score += 10.0
+
+    return score
+
+def _pick_best_rect(page: fitz.Page, rects: List[fitz.Rect], kind: str) -> Optional[fitz.Rect]:
+    rects = _dedupe_rects(rects)
+    if not rects:
+        return None
+    return max(rects, key=lambda r: _score_hit(page, r, kind))
 
 # ============================================================
 # Text area detection (dynamic margins)
@@ -365,20 +395,48 @@ def _is_same_urlish(a: str, b: str) -> bool:
         return False
     return na == nb
 
+def _url_variants_from_meta(meta: Dict[str, Any]) -> List[str]:
+    """
+    Build a robust set of URL needles that can match header (scheme-less)
+    and footer (https://...) representations.
+    """
+    cands: List[str] = []
+    for k in ("source_url_display", "source_url_canonical", "source_url"):
+        v = (meta.get(k) or "").strip()
+        if v:
+            cands.append(v)
+
+    out: List[str] = []
+    seen = set()
+
+    def add(x: str):
+        x = (x or "").strip()
+        if not x:
+            return
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+
+    for u in cands:
+        add(u)
+        nu = _normalize_urlish(u)  # domain/path
+        add(nu)
+        add("https://" + nu)
+        add("http://" + nu)
+        add("www." + nu)
+        add("https://www." + nu)
+        add("http://www." + nu)
+
+    return out
+
 # ============================================================
 # Keep-out detection (content blocks)
 # ============================================================
 
 def _get_keepouts(page: fitz.Page) -> List[fitz.Rect]:
-    """
-    Keep-out rectangles representing content to avoid:
-    - Text blocks
-    - Image bounding boxes
-    """
     keepouts: List[fitz.Rect] = []
 
     try:
-        # Text blocks
         for b in (page.get_text("blocks") or []):
             x0, y0, x1, y1 = b[:4]
             r = fitz.Rect(x0, y0, x1, y1)
@@ -388,7 +446,6 @@ def _get_keepouts(page: fitz.Page) -> List[fitz.Rect]:
         pass
 
     try:
-        # Images
         for img in page.get_images(full=True) or []:
             xref = img[0]
             try:
@@ -400,7 +457,6 @@ def _get_keepouts(page: fitz.Page) -> List[fitz.Rect]:
     except Exception:
         pass
 
-    # Merge/clean: de-dupe and slightly inflate so we give breathing room
     keepouts = _dedupe_rects(keepouts, pad=0.5)
     keepouts = [inflate_rect(r, 1.5) for r in keepouts]
     return keepouts
@@ -431,13 +487,10 @@ def _rect_conflicts(r: fitz.Rect, occupied: List[fitz.Rect], pad: float = 0.0) -
 # ============================================================
 
 def _segment_intersects_rect(p0: fitz.Point, p1: fitz.Point, r: fitz.Rect) -> bool:
-    """Approximate test: sample points along segment and see if inside rect."""
-    # Fast reject using bounding box of segment
     seg_bb = fitz.Rect(min(p0.x, p1.x), min(p0.y, p1.y), max(p0.x, p1.x), max(p0.y, p1.y))
     if not seg_bb.intersects(r):
         return False
 
-    # Sample along segment
     steps = 12
     for i in range(steps + 1):
         t = i / steps
@@ -461,7 +514,6 @@ def _count_path_crossings(points: List[fitz.Point], keepouts: List[fitz.Rect]) -
 def _nearest_point_on_rect_edge(from_pt: fitz.Point, r: fitz.Rect) -> fitz.Point:
     x = _clamp(from_pt.x, r.x0, r.x1)
     y = _clamp(from_pt.y, r.y0, r.y1)
-    # Project to closest edge
     d_left = abs(x - r.x0)
     d_right = abs(r.x1 - x)
     d_top = abs(y - r.y0)
@@ -481,21 +533,12 @@ def _route_margin_first(
     side: str,
     page_rect: fitz.Rect,
 ) -> List[fitz.Point]:
-    """
-    Build a 3-point polyline:
-      start (on note edge) -> gutter waypoint -> end (on anchor edge)
-    Gutter keeps line mostly in margin; then final leg enters content.
-    """
     note_c = _center(note_rect)
     anchor_c = _center(anchor_rect)
 
-    # Start point from note edge facing anchor
     start = _nearest_point_on_rect_edge(anchor_c, note_rect)
-
-    # End point on anchor edge facing note
     end = _nearest_point_on_rect_edge(note_c, anchor_rect)
 
-    # Gutter x just inside margin lane boundary (heuristic)
     if side == "left":
         gutter_x = min(note_rect.x1 + 6.0, page_rect.width * 0.22)
         gutter_x = max(gutter_x, note_rect.x1 + 4.0)
@@ -503,15 +546,10 @@ def _route_margin_first(
         gutter_x = max(note_rect.x0 - 6.0, page_rect.width * 0.78)
         gutter_x = min(gutter_x, note_rect.x0 - 4.0)
 
-    # Waypoint y is between start and end to keep diagonal short; prefer end.y (so it "arrives" cleanly)
     waypoint = fitz.Point(gutter_x, end.y)
-
     return [start, waypoint, end]
 
 def _draw_arrowhead(page: fitz.Page, tail: fitz.Point, tip: fitz.Point, color=RED):
-    """
-    Draw a simple arrowhead at 'tip' pointing from tail->tip.
-    """
     dx = tip.x - tail.x
     dy = tip.y - tail.y
     ang = math.atan2(dy, dx)
@@ -556,7 +594,6 @@ def _build_note_rect_in_lane(
     fs, wrapped, w_used, h_needed = _optimize_layout_for_margin(label, max_w)
     w_used = min(w_used, max_w)
 
-    # Left align inside lane with small pad
     x0 = lane.x0 + 4.0
     x1 = min(lane.x1 - 4.0, x0 + w_used)
 
@@ -570,9 +607,6 @@ def _build_note_rect_in_lane(
     return rect, wrapped, fs
 
 def _push_to_avoid(rect: fitz.Rect, occupied: List[fitz.Rect], lane: fitz.Rect) -> fitz.Rect:
-    """
-    Greedy vertical push down (then up) to avoid overlaps on same side.
-    """
     if not occupied:
         return rect
 
@@ -581,7 +615,6 @@ def _push_to_avoid(rect: fitz.Rect, occupied: List[fitz.Rect], lane: fitz.Rect) 
     def collides(rr: fitz.Rect) -> bool:
         return _rect_conflicts(rr, occupied, pad=GAP_BETWEEN_CALLOUTS)
 
-    # Try downward nudges
     step = 8.0
     for _ in range(60):
         if not collides(r):
@@ -590,7 +623,6 @@ def _push_to_avoid(rect: fitz.Rect, occupied: List[fitz.Rect], lane: fitz.Rect) 
         if r.y1 > lane.y1:
             break
 
-    # Reset, try upward nudges
     r = fitz.Rect(rect)
     for _ in range(60):
         if not collides(r):
@@ -599,13 +631,12 @@ def _push_to_avoid(rect: fitz.Rect, occupied: List[fitz.Rect], lane: fitz.Rect) 
         if r.y0 < lane.y0:
             break
 
-    # Give up; return original (scorer will penalise overlap)
     return fitz.Rect(rect)
 
 def _choose_anchor_rect(rects: List[fitz.Rect]) -> fitz.Rect:
     """
-    Choose ONE anchor rect from a cluster:
-    - pick rect closest to cluster centroid (stable and representative)
+    Choose ONE anchor rect from a cluster.
+    Default: rect closest to cluster centroid.
     """
     rects = _dedupe_rects(rects)
     if not rects:
@@ -649,37 +680,28 @@ def _plan_callout_cost_based(
     occupied_right: List[fitz.Rect],
     label: str,
     target_rects_on_page1: List[fitz.Rect],
-    preferred_side: Optional[str] = None,  # "left" / "right" / None
+    preferred_side: Optional[str] = None,
 ) -> Optional[CalloutPlan]:
-    """
-    Build candidates on both sides around the anchor y, push to avoid overlap,
-    score by distance+crossings+alignment+overlaps, pick lowest.
-    """
     pr = page.rect
     footer_no_go = fitz.Rect(NO_GO_RECT) & pr
 
-    # Exclude if no targets
     rects = _dedupe_rects(target_rects_on_page1)
     if not rects:
         return None
 
-    # "No-go" around highlights (don’t place callout on top of them)
     target_union = _union_rect(rects)
     target_no_go = inflate_rect(target_union, GAP_FROM_HIGHLIGHTS)
 
     anchor_rect = _choose_anchor_rect(rects)
     anchor_y = _center(anchor_rect).y
 
-    # Candidate generation function
     def candidate(side: str) -> Optional[CalloutPlan]:
         lane = left_lane if side == "left" else right_lane
         occ = occupied_left if side == "left" else occupied_right
 
-        # initial rect near anchor y
         note_rect, wrapped, fs = _build_note_rect_in_lane(lane, pr, label, anchor_y)
         note_rect = _push_to_avoid(note_rect, occ, lane)
 
-        # Hard rejects:
         if note_rect.intersects(text_area):
             return None
         if note_rect.intersects(target_no_go):
@@ -707,19 +729,17 @@ def _plan_callout_cost_based(
     if not candidates:
         return None
 
-    # Score candidates; bias slightly toward preferred_side if given and scores close
     scored: List[Tuple[float, CalloutPlan]] = []
     for c in candidates:
         occ = occupied_left if c.side == "left" else occupied_right
         s = _placement_score(c.note_rect, c.anchor_rect, c.leader_points, keepouts, occ, footer_no_go)
         if preferred_side and c.side == preferred_side:
-            s *= 0.92  # gentle preference
+            s *= 0.92
         scored.append((s, c))
 
     scored.sort(key=lambda x: x[0])
     best = scored[0][1]
 
-    # Mark occupancy
     if best.side == "left":
         occupied_left.append(best.note_rect)
     else:
@@ -760,21 +780,23 @@ def annotate_pdf_bytes(
     criterion_id: str,
     meta: Dict[str, Any],
     *,
-    # Optional: keep your old deterministic mapping as a preference rather than a rule
-    preferred_side_by_label: Optional[Dict[str, str]] = None,  # label -> "left"/"right"
+    preferred_side_by_label: Optional[Dict[str, str]] = None,
 ) -> Tuple[bytes, Dict[str, Any]]:
     """
     Pipeline:
       1) Draw red rectangles around hits (quotes/meta/stars).
       2) On page 1: place margin callouts in left/right lanes via cost scoring.
       3) Draw callouts (white box + red text) AND leader lines with arrowheads to an anchor highlight.
+
+    Changes in this version:
+      - URL: uses variants + BEST-OCCURRENCE scoring (header preferred, footer avoided).
+      - Venue/Ensemble/Date: picks BEST occurrence on page 1 (boxes once).
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     if len(doc) == 0:
         return pdf_bytes, {}
 
     page1 = doc.load_page(0)
-    pr1 = page1.rect
 
     total_quote_hits = 0
     total_meta_hits = 0
@@ -786,11 +808,10 @@ def annotate_pdf_bytes(
     occupied_right: List[fitz.Rect] = []
     plans: List[CalloutPlan] = []
 
+    # ------------------------------------------------------------
+    # 1) Quote highlights (UNCHANGED)
+    # ------------------------------------------------------------
     meta_url = (meta.get("source_url") or "").strip()
-
-    # ------------------------------------------------------------
-    # 1) Quote highlights (URL-like quote terms restricted to page 1)
-    # ------------------------------------------------------------
     for page in doc:
         for term in (quote_terms or []):
             t = (term or "").strip()
@@ -807,63 +828,56 @@ def annotate_pdf_bytes(
                 total_quote_hits += 1
 
     # ------------------------------------------------------------
-    # 2) Metadata hits + callout planning
+    # 2) Metadata highlighting + callouts
     # ------------------------------------------------------------
-    def _find_targets_across_doc(
-        needle: str,
-        *,
-        page_indices: Optional[List[int]] = None
-    ) -> List[Tuple[int, fitz.Rect]]:
-        out: List[Tuple[int, fitz.Rect]] = []
-        needle = (needle or "").strip()
-        if not needle:
-            return out
-        indices = page_indices if page_indices is not None else list(range(doc.page_count))
-        for pi in indices:
-            p = doc.load_page(pi)
-            try:
-                rects = p.search_for(needle)
-            except Exception:
-                rects = []
-            for r in rects:
-                out.append((pi, r))
-        return out
 
-    def _do_job(label: str, value: Optional[str], variants: Optional[List[str]] = None):
+    def _do_job(
+        label: str,
+        value: Optional[str],
+        variants: Optional[List[str]] = None,
+        *,
+        kind: str = "generic",
+        single_best: bool = True,
+        page1_only: bool = True,
+    ):
+        """
+        single_best=True:
+          - boxes only the best occurrence on page 1
+          - callout anchored to that occurrence
+        """
         nonlocal total_meta_hits, plans
 
         val_str = str(value or "").strip()
         if not val_str:
             return
 
-        is_url = _looks_like_url(val_str) or (meta_url and _is_same_urlish(val_str, meta_url))
-        indices = [0] if is_url else None
-
         needles = list(dict.fromkeys([val_str] + (variants or [])))
-        targets_by_page: Dict[int, List[fitz.Rect]] = {}
 
+        # Collect rects on page 1 only (matches your manual behavior)
+        rects_p1: List[fitz.Rect] = []
         for n in needles:
-            for pi, r in _find_targets_across_doc(n, page_indices=indices):
-                targets_by_page.setdefault(pi, []).append(r)
+            rects_p1.extend(_search_term(page1, n))
 
-        if not targets_by_page:
-            return
-
-        # Red boxes around all metadata hits across the doc
-        for pi, rects in targets_by_page.items():
-            p = doc.load_page(pi)
-            for r in _dedupe_rects(rects):
-                p.draw_rect(r, color=RED, width=BOX_WIDTH)
-                total_meta_hits += 1
-
-        # Callouts are anchored on page 1 only (like your original)
-        rects_p1 = targets_by_page.get(0, [])
+        rects_p1 = _dedupe_rects(rects_p1)
         if not rects_p1:
             return
 
-        preferred = None
-        if preferred_side_by_label:
-            preferred = preferred_side_by_label.get(label)
+        if single_best:
+            best = _pick_best_rect(page1, rects_p1, kind=kind)  # header preferred, footer avoided
+            if not best:
+                return
+            # Draw ONE box
+            page1.draw_rect(best, color=RED, width=BOX_WIDTH)
+            total_meta_hits += 1
+            anchor_rects = [best]
+        else:
+            # Draw all (rarely desired for your workflow)
+            for r in rects_p1:
+                page1.draw_rect(r, color=RED, width=BOX_WIDTH)
+                total_meta_hits += 1
+            anchor_rects = rects_p1
+
+        preferred = preferred_side_by_label.get(label) if preferred_side_by_label else None
 
         plan = _plan_callout_cost_based(
             page1,
@@ -874,61 +888,93 @@ def annotate_pdf_bytes(
             occupied_left=occupied_left,
             occupied_right=occupied_right,
             label=label,
-            target_rects_on_page1=rects_p1,
+            target_rects_on_page1=anchor_rects,  # anchor(s)
             preferred_side=preferred,
         )
         if plan:
             plans.append(plan)
 
-    _do_job("Original source of publication.", meta.get("source_url"))
-    _do_job("Venue is distinguished organization.", meta.get("venue_name"))
-    _do_job("Ensemble is distinguished organization.", meta.get("ensemble_name"))
-    _do_job("Performance date.", meta.get("performance_date"))
-    _do_job("Beneficiary lead role evidence.", meta.get("beneficiary_name"), meta.get("beneficiary_variants"))
+    # --- URL: use variants and best-occurrence scoring ---
+    _do_job(
+        "Original source of publication.",
+        meta.get("source_url"),
+        variants=_url_variants_from_meta(meta),
+        kind="url",
+        single_best=True,
+        page1_only=True,
+    )
+
+    # --- Venue/Ensemble/Date: box once (best occurrence) ---
+    _do_job(
+        "Venue is distinguished organization.",
+        meta.get("venue_name"),
+        kind="entity",
+        single_best=True,
+        page1_only=True,
+    )
+    _do_job(
+        "Ensemble is distinguished organization.",
+        meta.get("ensemble_name"),
+        kind="entity",
+        single_best=True,
+        page1_only=True,
+    )
+    _do_job(
+        "Performance date.",
+        meta.get("performance_date"),
+        kind="date",
+        single_best=True,
+        page1_only=True,
+    )
+
+    # Beneficiary: often you *do* want multiple variants; still choose best occurrence for the callout anchor
+    _do_job(
+        "Beneficiary lead role evidence.",
+        meta.get("beneficiary_name"),
+        variants=meta.get("beneficiary_variants"),
+        kind="entity",
+        single_best=True,
+        page1_only=True,
+    )
 
     # ------------------------------------------------------------
-    # 3) Stars (optional criterion)
+    # 3) Stars (optional criterion) — choose best on page 1
     # ------------------------------------------------------------
     if criterion_id in _STAR_CRITERIA:
-        stars_map: Dict[int, List[fitz.Rect]] = {}
-        for p in doc:
-            for tok in _find_high_star_tokens(p):
-                found = p.search_for(tok)
-                if found:
-                    stars_map.setdefault(p.number, []).extend(found)
-                    for r in _dedupe_rects(found):
-                        p.draw_rect(r, color=RED, width=BOX_WIDTH)
-                        total_quote_hits += 1
+        stars_rects_p1: List[fitz.Rect] = []
+        for tok in _find_high_star_tokens(page1):
+            stars_rects_p1.extend(page1.search_for(tok) or [])
 
-        if stars_map.get(0):
-            label = "Highly acclaimed review of the distinguished performance."
-            preferred = None
-            if preferred_side_by_label:
-                preferred = preferred_side_by_label.get(label)
+        stars_rects_p1 = _dedupe_rects(stars_rects_p1)
+        if stars_rects_p1:
+            best = _pick_best_rect(page1, stars_rects_p1, kind="generic")
+            if best:
+                page1.draw_rect(best, color=RED, width=BOX_WIDTH)
+                total_quote_hits += 1
 
-            plan = _plan_callout_cost_based(
-                page1,
-                text_area=text_area,
-                left_lane=left_lane,
-                right_lane=right_lane,
-                keepouts=keepouts_p1,
-                occupied_left=occupied_left,
-                occupied_right=occupied_right,
-                label=label,
-                target_rects_on_page1=stars_map[0],
-                preferred_side=preferred,
-            )
-            if plan:
-                plans.append(plan)
+                label = "Highly acclaimed review of the distinguished performance."
+                preferred = preferred_side_by_label.get(label) if preferred_side_by_label else None
+                plan = _plan_callout_cost_based(
+                    page1,
+                    text_area=text_area,
+                    left_lane=left_lane,
+                    right_lane=right_lane,
+                    keepouts=keepouts_p1,
+                    occupied_left=occupied_left,
+                    occupied_right=occupied_right,
+                    label=label,
+                    target_rects_on_page1=[best],
+                    preferred_side=preferred,
+                )
+                if plan:
+                    plans.append(plan)
 
     # ------------------------------------------------------------
-    # 4) Draw callouts + leaders last
+    # 4) Draw callouts + leaders last (arrows are already drawn here)
     # ------------------------------------------------------------
     for plan in plans:
-        # White background box
         page1.draw_rect(plan.note_rect, color=WHITE, fill=WHITE, overlay=True)
 
-        # Text
         _insert_textbox_fit(
             page1,
             plan.note_rect,
@@ -939,12 +985,10 @@ def annotate_pdf_bytes(
             overlay=True,
         )
 
-        # Leader polyline
         pts = plan.leader_points
         for i in range(len(pts) - 1):
             page1.draw_line(pts[i], pts[i + 1], color=RED, width=LEADER_WIDTH)
 
-        # Arrowhead on final segment
         if len(pts) >= 2:
             _draw_arrowhead(page1, pts[-2], pts[-1], color=RED)
 
