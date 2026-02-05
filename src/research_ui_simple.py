@@ -159,40 +159,70 @@ def render_research_tab():
                         st.caption(f"**Why relevant:** {relevance}")
                     if excerpt:
                         with st.expander("📄 Preview excerpt", expanded=False):
-                            st.text(excerpt)
+                            st.markdown(excerpt)
                     
-                    # Fetch full preview button
-                    if st.button("👁️ View Full Article", key=f"fetch_{cid}_{i}"):
-                        with st.spinner("Fetching full content..."):
+                    # PDF Preview - show exact final format
+                    if st.button("📄 Preview as PDF", key=f"pdf_preview_{cid}_{i}"):
+                        with st.spinner("Generating PDF preview..."):
                             try:
-                                from src.web_to_pdf import fetch_webpage_content
-                                webpage_data = fetch_webpage_content(url)
-                                st.session_state.research_previews[url] = webpage_data
-                                st.success("✅ Fetched!")
-                                st.rerun()
+                                from src.web_to_pdf import convert_webpage_to_pdf_with_margins
+                                import base64
+                                
+                                # Get full content from Tavily
+                                full_content = item.get('full_content', '')
+                                if not full_content:
+                                    st.error("No content available for PDF generation")
+                                else:
+                                    # Prepare webpage data in expected format
+                                    webpage_data = {
+                                        'title': title,
+                                        'author': '',  # Tavily doesn't always have author
+                                        'date': '',
+                                        'url': url,
+                                        'content': full_content
+                                    }
+                                    
+                                    # Convert to PDF with margins (same format as final export)
+                                    pdf_bytes = convert_webpage_to_pdf_with_margins(
+                                        webpage_data,
+                                        left_margin_mm=40,
+                                        right_margin_mm=40,
+                                        top_margin_mm=20,
+                                        bottom_margin_mm=20
+                                    )
+                                    
+                                    # Store in session state
+                                    if "pdf_previews" not in st.session_state:
+                                        st.session_state.pdf_previews = {}
+                                    st.session_state.pdf_previews[url] = pdf_bytes
+                                    
+                                    st.success("✅ PDF preview ready!")
+                                    st.rerun()
+                                    
                             except Exception as e:
-                                st.error(f"Could not fetch: {str(e)}")
+                                st.error(f"Could not generate PDF: {str(e)}")
                     
-                    # Show full preview if fetched
-                    if url in st.session_state.research_previews:
-                        preview = st.session_state.research_previews[url]
-                        with st.expander("📖 Full Article Preview", expanded=False):
-                            st.markdown(f"**Title:** {preview.get('title', 'Unknown')}")
-                            st.markdown(f"**Author:** {preview.get('author', 'Unknown')}")
-                            st.markdown(f"**Date:** {preview.get('date', 'Unknown')}")
-                            st.markdown("---")
-                            content = preview.get('content', '')
-                            if content:
-                                st.text_area(
-                                    "Full article text",
-                                    value=content,
-                                    height=400,
-                                    disabled=True,
-                                    key=f"full_text_{cid}_{i}",
-                                    label_visibility="collapsed"
-                                )
-                            else:
-                                st.warning("No content could be extracted.")
+                    # Show PDF preview if generated
+                    if "pdf_previews" in st.session_state and url in st.session_state.pdf_previews:
+                        with st.expander("📖 PDF Preview (Final Format)", expanded=True):
+                            pdf_bytes = st.session_state.pdf_previews[url]
+                            
+                            # Display PDF inline
+                            import base64
+                            base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+                            pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800px" type="application/pdf"></iframe>'
+                            
+                            st.markdown("**This is exactly how the PDF will look after export:**")
+                            st.markdown(pdf_display, unsafe_allow_html=True)
+                            
+                            # Download option
+                            st.download_button(
+                                label="⬇️ Download Preview PDF",
+                                data=pdf_bytes,
+                                file_name=f"preview_{title[:50]}.pdf",
+                                mime="application/pdf",
+                                key=f"download_preview_{cid}_{i}"
+                            )
                 
                 st.markdown("---")
             
