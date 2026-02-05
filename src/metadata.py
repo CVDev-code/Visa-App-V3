@@ -78,11 +78,6 @@ def merge_metadata(
     """
     Merge priority (highest wins):
       overrides > csv row > auto
-
-    Note:
-      - We keep returning the legacy keys.
-      - If autodetect adds source_url_display/source_url_canonical, they flow through via auto,
-        but CSV/overrides can still win on source_url.
     """
     auto = auto or {}
     overrides = overrides or {}
@@ -96,59 +91,19 @@ def merge_metadata(
             or None
         )
 
-    merged = {
+    return {
         "source_url": pick("source_url"),
         "venue_name": pick("venue_name"),
         "ensemble_name": pick("ensemble_name"),
         "performance_date": pick("performance_date"),
     }
 
-    # pass through optional extras from auto (safe if ignored downstream)
-    if auto.get("source_url_display"):
-        merged["source_url_display"] = auto.get("source_url_display")
-    if auto.get("source_url_canonical"):
-        merged["source_url_canonical"] = auto.get("source_url_canonical")
-
-    return merged
-
 
 # ============================================================
 # AI metadata auto-detect (all pages)
 # ============================================================
 
-# Broader regex: captures https://..., www..., and scheme-less domain/path.
-URL_ANY_REGEX = re.compile(
-    r"(?P<url>"
-    r"(?:https?://|www\.)[^\s)>\]]+"
-    r"|"
-    r"(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s)>\]]+)?"
-    r")",
-    re.IGNORECASE,
-)
-
-
-def _normalize_urlish(url: str) -> str:
-    """
-    Normalize to display form: domain/path (no scheme, no www, no trailing slash), lowercase.
-    """
-    u = (url or "").strip()
-    u = u.strip(" \t\r\n'\"()[]{}<>.,;")
-    u = re.sub(r"^https?://", "", u, flags=re.I)
-    u = re.sub(r"^www\.", "", u, flags=re.I)
-    u = u.rstrip("/")
-    return u.lower()
-
-
-def _to_canonical(url_display: str) -> str:
-    """
-    Convert display form domain/path -> https://domain/path
-    """
-    u = (url_display or "").strip()
-    if not u:
-        return ""
-    if not re.match(r"^https?://", u, flags=re.I):
-        u = "https://" + u.lstrip("/")
-    return u.rstrip(".,);]")
+URL_REGEX = re.compile(r"(https?://[^\s)>\]]+)", re.IGNORECASE)
 
 
 _AUTODETECT_SYSTEM = (
@@ -165,7 +120,7 @@ Return JSON with keys:
 - performance_date
 
 Guidelines:
-- source_url: a URL visible in the document (prefer the publication URL; prefer the URL shown near the top of page 1 if present, not the print footer).
+- source_url: a URL visible in the document (prefer the publication URL).
 - performance_date: the date of the performance/event (as written in the document).
 - venue_name: venue / hall / festival / organisation hosting the performance.
 - ensemble_name: orchestra/ensemble/choir/company performing (if stated).
@@ -214,25 +169,15 @@ def autodetect_metadata(
         val = data.get(key, "")
         return str(val or "").strip()
 
-    # URL from model (may be canonical or display)
-    url_raw = s("source_url")
-
-    # Fallback: capture scheme-less too (important for header URLs)
-    if not url_raw:
-        m = URL_ANY_REGEX.search(text)
+    # Lightweight URL fallback (helps even if model misses it)
+    url = s("source_url")
+    if not url:
+        m = URL_REGEX.search(text)
         if m:
-            url_raw = m.group("url").strip().rstrip(".,);]")
-
-    # Produce both forms for downstream matching/scoring.
-    url_display = _normalize_urlish(url_raw) if url_raw else ""
-    url_canonical = _to_canonical(url_display) if url_display else ""
+            url = m.group(1).strip().rstrip(".,);]")
 
     return {
-        # Legacy key: keep it canonical so CSV remains consistent
-        "source_url": url_canonical or url_raw or "",
-        # Extras: used by the highlighter to find the header occurrence
-        "source_url_display": url_display,
-        "source_url_canonical": url_canonical,
+        "source_url": url or "",
         "venue_name": s("venue_name"),
         "ensemble_name": s("ensemble_name"),
         "performance_date": s("performance_date"),
