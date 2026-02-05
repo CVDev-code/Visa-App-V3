@@ -4,16 +4,15 @@ Automatically searches the web and finds evidence for O-1 criteria.
 """
 
 import json
-import os
 from typing import Dict, List, Optional
-
 from openai import OpenAI
+import os
 
 
 def _get_secret(name: str):
     """Works on Streamlit Cloud (st.secrets) and locally (.env / env vars)."""
     try:
-        import streamlit as st  # type: ignore
+        import streamlit as st
         if name in st.secrets:
             return st.secrets[name]
     except Exception:
@@ -21,18 +20,20 @@ def _get_secret(name: str):
     return os.getenv(name)
 
 
+# System prompt for AI research
 RESEARCH_SYSTEM_PROMPT = """You are an expert immigration paralegal researcher for O-1 visa petitions.
 
-You MUST use web search to find real URLs (articles, announcements, reviews) that support specific O-1 criteria for a performing artist.
+Your task is to search the web and find actual evidence (URLs to articles, announcements, reviews) that support specific O-1 criteria for a performing artist.
 
-Return ONLY valid JSON. No markdown, no commentary, no extra keys outside the JSON object.
+You have access to web search. Use it to find real, verifiable evidence.
 
-For each selected criterion, find 3–5 high-quality sources. Prioritize:
+For each criterion, find 3-5 high-quality sources. Prioritize:
 - Primary sources (official announcements, award websites)
-- Prestigious publications (NYT, Guardian, FT, major trade press)
+- Prestigious publications (NYT, Guardian, major trade press)
 - Recent content (within last 5 years)
 - Content that clearly mentions the artist
-"""
+
+Return results as JSON."""
 
 
 RESEARCH_PROMPT_TEMPLATE = """Find evidence to support O-1 criteria for this artist.
@@ -62,8 +63,12 @@ Criteria 2 & 4 (Distinguished Performances/Organizations):
 - Look for: Metropolitan Opera, Berlin Phil, Royal Opera, etc.
 - Also search OperaBase for documented performances
 
-Return JSON exactly in this shape:
+For each URL you find:
+1. Verify it exists and is relevant
+2. Extract the title
+3. Note why it's relevant
 
+Return JSON:
 {{
   "results_by_criterion": {{
     "3": [
@@ -76,29 +81,7 @@ Return JSON exactly in this shape:
       }}
     ]
   }}
-}}
-"""
-
-
-def _extract_json(text: str) -> Dict:
-    """Best-effort: extract a JSON object even if the model accidentally wraps it in text."""
-    text = (text or "").strip()
-    if not text:
-        return {}
-
-    # First try direct parse
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Try slicing the first {...} block
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return json.loads(text[start : end + 1])
-
-    return {}
+}}"""
 
 
 def ai_search_for_evidence(
@@ -106,27 +89,47 @@ def ai_search_for_evidence(
     name_variants: List[str],
     selected_criteria: List[str],
     criteria_descriptions: Dict[str, str],
-    feedback: Optional[Dict] = None,
+    feedback: Optional[Dict] = None
 ) -> Dict[str, List[Dict]]:
+    """
+    AI automatically searches the web and finds evidence for O-1 criteria.
+    
+    Args:
+        artist_name: Artist's name
+        name_variants: Alternative names
+        selected_criteria: List of criterion IDs
+        criteria_descriptions: Descriptions of each criterion
+        feedback: Optional dict with approved/rejected URLs for regeneration
+        
+    Returns:
+        {
+          "3": [
+            {"url": "...", "title": "...", "source": "...", "relevance": "...", "excerpt": "..."},
+            ...
+          ],
+          ...
+        }
+    """
     api_key = _get_secret("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
-
-    # Recommend setting OPENAI_MODEL="gpt-5" in Streamlit Cloud secrets
-    model = _get_secret("OPENAI_MODEL") or "gpt-5"
-
+    
+    model = _get_secret("OPENAI_MODEL") or "gpt-4o-mini"
     client = OpenAI(api_key=api_key)
-
-    criteria_list = "\n".join(
-        [f"({cid}) {criteria_descriptions.get(cid, '')}" for cid in selected_criteria]
-    )
-
+    
+    # Build criteria list
+    criteria_list = "\n".join([
+        f"({cid}) {criteria_descriptions.get(cid, '')}"
+        for cid in selected_criteria
+    ])
+    
+    # Add feedback if regenerating
     feedback_text = ""
     if feedback:
         approved = feedback.get("approved_urls", [])
         rejected = feedback.get("rejected_urls", [])
         user_feedback = feedback.get("user_feedback", "")
-
+        
         if approved or rejected or user_feedback:
             feedback_text = f"""
 
@@ -137,57 +140,57 @@ IMPORTANT - Regeneration Context:
 
 Focus on finding NEW, DIFFERENT sources that address the user's feedback.
 """
-
-    prompt = (
-        RESEARCH_PROMPT_TEMPLATE.format(
-            artist_name=artist_name,
-            name_variants=", ".join(name_variants) if name_variants else "None",
-            criteria_list=criteria_list,
-        )
-        + feedback_text
-    )
-
+    
+    prompt = RESEARCH_PROMPT_TEMPLATE.format(
+        artist_name=artist_name,
+        name_variants=", ".join(name_variants) if name_variants else "None",
+        criteria_list=criteria_list
+    ) + feedback_text
+    
     try:
-        # ✅ Use Responses API web_search tool
-        # NOTE: Do NOT pass response_format here (older SDKs throw the error you saw)
-        resp = client.responses.create(
+        # Call AI with web search tool
+        resp = client.chat.completions.create(
             model=model,
-            tools=[{"type": "web_search"}],
-            input=[
+            messages=[
                 {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": prompt}
             ],
+            tools=[{
+                "type": "web_search_20250305",
+                "name": "web_search"
+            }],
+            response_format={"type": "json_object"}
         )
-
-        raw = getattr(resp, "output_text", None) or ""
-        data = _extract_json(raw)
-
-        results = data.get("results_by_criterion", {}) if isinstance(data, dict) else {}
-
-        cleaned: Dict[str, List[Dict]] = {}
+        
+        # Extract response
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        
+        results = data.get("results_by_criterion", {})
+        
+        # Validate structure
+        cleaned = {}
         for cid in selected_criteria:
             items = results.get(cid, [])
             if not isinstance(items, list):
                 items = []
-
-            valid_items: List[Dict] = []
+            
+            valid_items = []
             for item in items:
                 if isinstance(item, dict) and item.get("url") and item.get("title"):
-                    valid_items.append(
-                        {
-                            "url": item.get("url", ""),
-                            "title": item.get("title", ""),
-                            "source": item.get("source", "Unknown"),
-                            "relevance": item.get("relevance", ""),
-                            "excerpt": item.get("excerpt", ""),
-                        }
-                    )
-
+                    valid_items.append({
+                        "url": item.get("url", ""),
+                        "title": item.get("title", ""),
+                        "source": item.get("source", "Unknown"),
+                        "relevance": item.get("relevance", ""),
+                        "excerpt": item.get("excerpt", "")
+                    })
+            
             if valid_items:
                 cleaned[cid] = valid_items
-
+        
         return cleaned
-
+        
     except Exception as e:
         print(f"[ai_search_for_evidence] Error: {e}")
         raise RuntimeError(f"AI search failed: {str(e)}")
