@@ -14,7 +14,7 @@ from src.metadata import (
 from src.openai_terms import suggest_ovisa_quotes
 from src.pdf_highlighter import annotate_pdf_bytes
 from src.prompts import CRITERIA
-from src.research_ui_enhanced import render_research_tab
+from src.research_ui_simple import render_research_tab
 
 load_dotenv()
 st.set_page_config(page_title="O-1 Evidence Assistant", layout="wide")
