@@ -1,18 +1,23 @@
 """
 AI-Powered Research Assistant
 Automatically searches the web and finds evidence for O-1 criteria.
+
+IMPORTANT:
+- Web search is supported via the OpenAI **Responses API** with tools=[{"type": "web_search"}]
+- Chat Completions does NOT accept tools[].type like "web_search_20250305" (only "function"/"custom")
 """
 
 import json
-from typing import Dict, List, Optional
-from openai import OpenAI
 import os
+from typing import Dict, List, Optional
+
+from openai import OpenAI
 
 
 def _get_secret(name: str):
     """Works on Streamlit Cloud (st.secrets) and locally (.env / env vars)."""
     try:
-        import streamlit as st
+        import streamlit as st  # type: ignore
         if name in st.secrets:
             return st.secrets[name]
     except Exception:
@@ -89,18 +94,11 @@ def ai_search_for_evidence(
     name_variants: List[str],
     selected_criteria: List[str],
     criteria_descriptions: Dict[str, str],
-    feedback: Optional[Dict] = None
+    feedback: Optional[Dict] = None,
 ) -> Dict[str, List[Dict]]:
     """
     AI automatically searches the web and finds evidence for O-1 criteria.
-    
-    Args:
-        artist_name: Artist's name
-        name_variants: Alternative names
-        selected_criteria: List of criterion IDs
-        criteria_descriptions: Descriptions of each criterion
-        feedback: Optional dict with approved/rejected URLs for regeneration
-        
+
     Returns:
         {
           "3": [
@@ -113,23 +111,25 @@ def ai_search_for_evidence(
     api_key = _get_secret("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
-    
-    model = _get_secret("OPENAI_MODEL") or "gpt-4o-mini"
+
+    # NOTE: Web search tool is supported via Responses API; model availability can vary.
+    # If you run into model/tool issues, set OPENAI_MODEL="gpt-5" in Streamlit Cloud secrets.
+    model = _get_secret("OPENAI_MODEL") or "gpt-5"
+
     client = OpenAI(api_key=api_key)
-    
+
     # Build criteria list
-    criteria_list = "\n".join([
-        f"({cid}) {criteria_descriptions.get(cid, '')}"
-        for cid in selected_criteria
-    ])
-    
+    criteria_list = "\n".join(
+        [f"({cid}) {criteria_descriptions.get(cid, '')}" for cid in selected_criteria]
+    )
+
     # Add feedback if regenerating
     feedback_text = ""
     if feedback:
         approved = feedback.get("approved_urls", [])
         rejected = feedback.get("rejected_urls", [])
         user_feedback = feedback.get("user_feedback", "")
-        
+
         if approved or rejected or user_feedback:
             feedback_text = f"""
 
@@ -140,57 +140,71 @@ IMPORTANT - Regeneration Context:
 
 Focus on finding NEW, DIFFERENT sources that address the user's feedback.
 """
-    
-    prompt = RESEARCH_PROMPT_TEMPLATE.format(
-        artist_name=artist_name,
-        name_variants=", ".join(name_variants) if name_variants else "None",
-        criteria_list=criteria_list
-    ) + feedback_text
-    
-    try:
-        # Call AI with web search tool
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ],
-            tools=[{
-                "type": "web_search_20250305",
-                "name": "web_search"
-            }],
-            response_format={"type": "json_object"}
+
+    prompt = (
+        RESEARCH_PROMPT_TEMPLATE.format(
+            artist_name=artist_name,
+            name_variants=", ".join(name_variants) if name_variants else "None",
+            criteria_list=criteria_list,
         )
-        
-        # Extract response
-        raw = resp.choices[0].message.content or "{}"
-        data = json.loads(raw)
-        
+        + feedback_text
+    )
+
+    try:
+        # ✅ Responses API + web_search tool (this fixes your 400 invalid tools[].type error)
+        resp = client.responses.create(
+            model=model,
+            tools=[{"type": "web_search"}],
+            tool_choice="auto",
+            response_format={"type": "json_object"},
+            input=[
+                {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+        )
+
+        # Extract response text
+        raw = (resp.output_text or "").strip() or "{}"
+
+        # Parse JSON (with a fallback if the model returns extra text)
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            # Best-effort extraction of the first JSON object
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                data = json.loads(raw[start : end + 1])
+            else:
+                raise
+
         results = data.get("results_by_criterion", {})
-        
+
         # Validate structure
-        cleaned = {}
+        cleaned: Dict[str, List[Dict]] = {}
         for cid in selected_criteria:
             items = results.get(cid, [])
             if not isinstance(items, list):
                 items = []
-            
-            valid_items = []
+
+            valid_items: List[Dict] = []
             for item in items:
                 if isinstance(item, dict) and item.get("url") and item.get("title"):
-                    valid_items.append({
-                        "url": item.get("url", ""),
-                        "title": item.get("title", ""),
-                        "source": item.get("source", "Unknown"),
-                        "relevance": item.get("relevance", ""),
-                        "excerpt": item.get("excerpt", "")
-                    })
-            
+                    valid_items.append(
+                        {
+                            "url": item.get("url", ""),
+                            "title": item.get("title", ""),
+                            "source": item.get("source", "Unknown"),
+                            "relevance": item.get("relevance", ""),
+                            "excerpt": item.get("excerpt", ""),
+                        }
+                    )
+
             if valid_items:
                 cleaned[cid] = valid_items
-        
+
         return cleaned
-        
+
     except Exception as e:
         print(f"[ai_search_for_evidence] Error: {e}")
         raise RuntimeError(f"AI search failed: {str(e)}")
