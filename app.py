@@ -243,7 +243,7 @@ with tab2:
 
         data = st.session_state["ai_by_file"].get(f.name)
         if not data:
-            st.info("No AI results yet for this PDF. Click "Generate for all PDFs".")
+            st.info("No AI results yet for this PDF. Click 'Generate for all PDFs'.")
             continue
 
         notes = data.get("notes", "")
@@ -257,7 +257,7 @@ with tab2:
         uf_key = f"user_feedback_{f.name}"
         st.session_state["regen_user_feedback"].setdefault(f.name, "")
         user_feedback = st.text_area(
-            "Optional instruction for regeneration (e.g. "focus only on critical acclaim and named roles; avoid generic praise").",
+            "Optional instruction for regeneration (e.g. 'focus only on critical acclaim and named roles; avoid generic praise').",
             value=st.session_state["regen_user_feedback"][f.name],
             key=uf_key,
             height=80,
