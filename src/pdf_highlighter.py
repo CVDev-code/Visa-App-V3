@@ -1,44 +1,43 @@
 import io
 import math
 import re
-from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional
 
 import fitz  # PyMuPDF
-
-# ============================================================
-# Style knobs
-# ============================================================
 
 RED = (1, 0, 0)
 WHITE = (1, 1, 1)
 
+# ---- style knobs ----
 BOX_WIDTH = 1.7
+LINE_WIDTH = 1.6
 FONTNAME = "Times-Bold"
-FONT_SIZES = [11, 10, 9, 8]
+FONT_SIZES = [12, 11, 10, 9, 8]
 
+# ---- footer no-go zone (page coordinates; PyMuPDF = top-left origin) ----
+NO_GO_RECT = fitz.Rect(
+    21.00,   # left
+    816.00,  # top
+    411.26,  # right
+    830.00   # bottom
+)
+
+# ---- spacing knobs ----
 EDGE_PAD = 12.0
+GAP_FROM_TEXT_BLOCKS = 8.0
 GAP_FROM_HIGHLIGHTS = 10.0
-GAP_BETWEEN_CALLOUTS = 10.0
+GAP_BETWEEN_CALLOUTS = 8.0
+ENDPOINT_PULLBACK = 1.5
 
-# Footer no-go zone (page coords; top-left origin)
-NO_GO_RECT = fitz.Rect(21.00, 816.00, 411.26, 830.00)
+# Arrowhead
+ARROW_LEN = 9.0
+ARROW_HALF_WIDTH = 4.5
 
-# Quote search robustness
+# For quote search robustness
 _MAX_TERM = 600
 _CHUNK = 60
 _CHUNK_OVERLAP = 18
 
-# Routing / scoring weights
-W_DIST = 1.0
-W_CROSS = 18.0          # crossings are expensive (to avoid clutter)
-W_SHIFT = 2.5           # keep callout aligned to anchor y
-W_OVERLAP = 15.0        # avoid colliding callouts
-W_FOOTER = 50.0         # avoid footer region on page 1
-
-ARROW_LEN = 7.0
-ARROW_ANGLE_DEG = 28.0
-LEADER_WIDTH = 1.5
 
 # ============================================================
 # Geometry helpers
@@ -52,6 +51,7 @@ def inflate_rect(r: fitz.Rect, pad: float) -> fitz.Rect:
     rr.y1 += pad
     return rr
 
+
 def _union_rect(rects: List[fitz.Rect]) -> fitz.Rect:
     if not rects:
         return fitz.Rect(0, 0, 0, 0)
@@ -60,25 +60,66 @@ def _union_rect(rects: List[fitz.Rect]) -> fitz.Rect:
         r |= x
     return r
 
+
 def _center(rect: fitz.Rect) -> fitz.Point:
     return fitz.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
 
+
+def _pull_back_point(from_pt: fitz.Point, to_pt: fitz.Point, dist: float) -> fitz.Point:
+    vx = from_pt.x - to_pt.x
+    vy = from_pt.y - to_pt.y
+    d = math.hypot(vx, vy)
+    if d == 0:
+        return to_pt
+    ux, uy = vx / d, vy / d
+    return fitz.Point(to_pt.x + ux * dist, to_pt.y + uy * dist)
+
+
+def _segment_hits_rect(p1: fitz.Point, p2: fitz.Point, r: fitz.Rect, steps: int = 60) -> bool:
+    for i in range(steps + 1):
+        t = i / steps
+        x = p1.x + (p2.x - p1.x) * t
+        y = p1.y + (p2.y - p1.y) * t
+        if r.contains(fitz.Point(x, y)):
+            return True
+    return False
+
+
+def _shift_rect_up(rect: fitz.Rect, shift: float, min_y: float = 2.0) -> fitz.Rect:
+    if shift <= 0:
+        return fitz.Rect(rect)
+    h = rect.y1 - rect.y0
+    new_y1 = max(min_y + h, rect.y1 - shift)
+    return fitz.Rect(rect.x0, new_y1 - h, rect.x1, new_y1)
+
+
+# ============================================================
+# HARD SAFETY: never pass invalid rects into insert_textbox
+# ============================================================
+
 def _rect_is_valid(r: fitz.Rect) -> bool:
     vals = [r.x0, r.y0, r.x1, r.y1]
-    return all(math.isfinite(v) for v in vals) and (r.x1 > r.x0) and (r.y1 > r.y0)
+    return (
+        all(math.isfinite(v) for v in vals)
+        and (r.x1 > r.x0)
+        and (r.y1 > r.y0)
+    )
+
 
 def _ensure_min_size(
     r: fitz.Rect,
     pr: fitz.Rect,
-    min_w: float = 55.0,
-    min_h: float = 14.0,
+    min_w: float = 20.0,
+    min_h: float = 12.0,
     pad: float = 2.0,
 ) -> fitz.Rect:
     rr = fitz.Rect(r)
+
     cx = (rr.x0 + rr.x1) / 2.0
     cy = (rr.y0 + rr.y1) / 2.0
     w = max(min_w, abs(rr.x1 - rr.x0))
     h = max(min_h, abs(rr.y1 - rr.y0))
+
     rr = fitz.Rect(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
 
     rr.x0 = max(pad, rr.x0)
@@ -88,61 +129,9 @@ def _ensure_min_size(
 
     if rr.x1 <= rr.x0 or rr.y1 <= rr.y0:
         rr = fitz.Rect(pad, pad, pad + min_w, pad + min_h)
+
     return rr
 
-def _clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
-
-def _dist(a: fitz.Point, b: fitz.Point) -> float:
-    return math.hypot(a.x - b.x, a.y - b.y)
-
-# ============================================================
-# ZONES + BEST-OCCURRENCE SCORING (NEW)
-# ============================================================
-
-def _zones(page: fitz.Page) -> Tuple[fitz.Rect, fitz.Rect]:
-    pr = page.rect
-    header = fitz.Rect(0, 0, pr.width, pr.height * 0.18)
-    footer = fitz.Rect(0, pr.height * 0.86, pr.width, pr.height)
-    return header, footer
-
-def _score_hit(page: fitz.Page, r: fitz.Rect, kind: str) -> float:
-    """
-    Higher = better.
-    kind: "url" | "entity" | "date" | "generic"
-    """
-    header, footer = _zones(page)
-    footer_no_go = (fitz.Rect(NO_GO_RECT) & page.rect)
-    c = _center(r)
-
-    score = 0.0
-
-    # Strong preference for header occurrences (matches your manual behavior)
-    if header.intersects(r):
-        score += 120.0
-        # extra boost if nearer the very top
-        score += 30.0 * (1.0 - (c.y / max(1.0, header.y1)))
-
-    # Strong penalty for footer / print URL area
-    if footer.intersects(r) or (footer_no_go.width > 0 and footer_no_go.height > 0 and footer_no_go.intersects(r)):
-        score -= 250.0
-
-    # Mild preference for earlier occurrence
-    score += max(0.0, 25.0 - (c.y / page.rect.height) * 25.0)
-
-    # Kind-specific tuning
-    if kind == "url":
-        score += 20.0
-    elif kind in ("entity", "date"):
-        score += 10.0
-
-    return score
-
-def _pick_best_rect(page: fitz.Page, rects: List[fitz.Rect], kind: str) -> Optional[fitz.Rect]:
-    rects = _dedupe_rects(rects)
-    if not rects:
-        return None
-    return max(rects, key=lambda r: _score_hit(page, r, kind))
 
 # ============================================================
 # Text area detection (dynamic margins)
@@ -150,7 +139,13 @@ def _pick_best_rect(page: fitz.Page, rects: List[fitz.Rect], kind: str) -> Optio
 
 def _get_fallback_text_area(page: fitz.Page) -> fitz.Rect:
     pr = page.rect
-    return fitz.Rect(pr.width * 0.12, pr.height * 0.12, pr.width * 0.88, pr.height * 0.88)
+    return fitz.Rect(
+        pr.width * 0.12,
+        pr.height * 0.12,
+        pr.width * 0.88,
+        pr.height * 0.88,
+    )
+
 
 def _detect_actual_text_area(page: fitz.Page) -> fitz.Rect:
     try:
@@ -174,8 +169,10 @@ def _detect_actual_text_area(page: fitz.Page) -> fitz.Rect:
 
         x0s.sort()
         x1s.sort()
+
         li = int(len(x0s) * 0.05)
         ri = int(len(x1s) * 0.95)
+
         text_left = x0s[max(0, li)]
         text_right = x1s[min(len(x1s) - 1, ri)]
 
@@ -189,22 +186,24 @@ def _detect_actual_text_area(page: fitz.Page) -> fitz.Rect:
     except Exception:
         return _get_fallback_text_area(page)
 
+
 # ============================================================
-# Text wrapping + textbox insertion
+# Text wrapping (simple + reliable)
 # ============================================================
 
 def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, float, float]:
     text = (text or "").strip()
     if not text:
-        return 11, "", box_width, 24.0
+        return 12, "", box_width, 24.0
 
     words = text.split()
-    max_h = 240.0
+    max_h = 180.0
 
     for fs in FONT_SIZES:
-        usable_w = max(30.0, box_width - 10.0)
+        usable_w = max(20.0, box_width - 10.0)
         lines: List[str] = []
         cur = ""
+
         for w in words:
             trial = (cur + " " + w).strip() if cur else w
             if fitz.get_text_length(trial, fontname=FONTNAME, fontsize=fs) <= usable_w:
@@ -213,15 +212,22 @@ def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, 
                 if cur:
                     lines.append(cur)
                 cur = w
+
         if cur:
             lines.append(cur)
 
         wrapped = "\n".join(lines)
         h = (len(lines) * fs * 1.25) + 10.0
+
         if h <= max_h or fs == FONT_SIZES[-1]:
             return fs, wrapped, box_width, h
 
-    return FONT_SIZES[-1], text, box_width, 50.0
+    return FONT_SIZES[-1], text, box_width, 44.0
+
+
+# ============================================================
+# Fit-guaranteed textbox insertion
+# ============================================================
 
 def _insert_textbox_fit(
     page: fitz.Page,
@@ -237,18 +243,29 @@ def _insert_textbox_fit(
     extra_pad_each_iter: float = 6.0,
 ) -> Tuple[fitz.Rect, float, int]:
     pr = page.rect
-    r = _ensure_min_size(fitz.Rect(rect), pr)
+    r = fitz.Rect(rect)
     fs = int(fontsize)
+
+    r = _ensure_min_size(r, pr)
+    if not _rect_is_valid(r):
+        return r, -1.0, fs
 
     def attempt(rr: fitz.Rect, fsize: int) -> float:
         rr = _ensure_min_size(rr, pr)
         if not _rect_is_valid(rr):
             return -1.0
         return page.insert_textbox(
-            rr, text, fontname=fontname, fontsize=fsize, color=color, align=align, overlay=overlay
+            rr,
+            text,
+            fontname=fontname,
+            fontsize=fsize,
+            color=color,
+            align=align,
+            overlay=overlay,
         )
 
     ret = attempt(r, fs)
+
     it = 0
     while ret < 0 and it < max_expand_iters:
         need = (-ret) + extra_pad_each_iter
@@ -262,7 +279,7 @@ def _insert_textbox_fit(
     shrink_tries = 0
     while ret < 0 and fs > FONT_SIZES[-1] and shrink_tries < 4:
         fs -= 1
-        r = _ensure_min_size(fitz.Rect(rect), pr)
+        r = fitz.Rect(rect)
         ret = attempt(r, fs)
 
         it = 0
@@ -279,18 +296,27 @@ def _insert_textbox_fit(
 
     return r, ret, fs
 
+
 # ============================================================
-# De-duplication
+# De-duplication for overlapping/nested hits
 # ============================================================
 
 def _rect_area(r: fitz.Rect) -> float:
     return max(0.0, (r.x1 - r.x0) * (r.y1 - r.y0))
 
+
 def _dedupe_rects(rects: List[fitz.Rect], pad: float = 1.0) -> List[fitz.Rect]:
+    """
+    Remove nested duplicates: if one rect is fully contained in a larger rect, keep only the larger.
+    Works well for cases like:
+      "Jasurbek", "Khaydarov", "Jasurbek Khaydarov", "Jasurbek Khaydarov’s Polydorus..."
+    """
     if not rects:
         return []
+
     rr = [fitz.Rect(r) for r in rects]
     rr.sort(key=lambda r: _rect_area(r), reverse=True)
+
     kept: List[fitz.Rect] = []
     for r in rr:
         rbuf = inflate_rect(r, pad)
@@ -301,8 +327,10 @@ def _dedupe_rects(rects: List[fitz.Rect], pad: float = 1.0) -> List[fitz.Rect]:
                 break
         if not contained:
             kept.append(r)
+
     kept.sort(key=lambda r: (r.y0, r.x0))
     return kept
+
 
 # ============================================================
 # Robust search helpers
@@ -311,10 +339,12 @@ def _dedupe_rects(rects: List[fitz.Rect], pad: float = 1.0) -> List[fitz.Rect]:
 def _normalize_spaces(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
+
 def _search_term(page: fitz.Page, term: str) -> List[fitz.Rect]:
     t = (term or "").strip()
     if not t:
         return []
+
     if len(t) > _MAX_TERM:
         t = t[:_MAX_TERM]
 
@@ -372,426 +402,293 @@ def _search_term(page: fitz.Page, term: str) -> List[fitz.Rect]:
 
     return []
 
+
 # ============================================================
-# URL helpers
+# Arrow drawing (tip ends at end-point)
 # ============================================================
 
-def _looks_like_url(s: str) -> bool:
-    s = (s or "").strip().lower()
-    return s.startswith("http://") or s.startswith("https://") or s.startswith("www.")
-
-def _normalize_urlish(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = s.strip(" \t\r\n'\"()[]{}<>.,;")
-    s = re.sub(r"^https?://", "", s)
-    s = re.sub(r"^www\.", "", s)
-    s = s.rstrip("/")
-    return s
-
-def _is_same_urlish(a: str, b: str) -> bool:
-    na = _normalize_urlish(a)
-    nb = _normalize_urlish(b)
-    if not na or not nb:
-        return False
-    return na == nb
-
-def _url_variants_from_meta(meta: Dict[str, Any]) -> List[str]:
+def _draw_arrowhead(page: fitz.Page, start: fitz.Point, end: fitz.Point):
     """
-    Build a robust set of URL needles that can match header (scheme-less)
-    and footer (https://...) representations.
+    Draw a small filled triangle arrowhead with its TIP exactly at `end`.
     """
-    cands: List[str] = []
-    for k in ("source_url_display", "source_url_canonical", "source_url"):
-        v = (meta.get(k) or "").strip()
-        if v:
-            cands.append(v)
+    vx = end.x - start.x
+    vy = end.y - start.y
+    d = math.hypot(vx, vy)
+    if d == 0:
+        return
 
-    out: List[str] = []
-    seen = set()
+    ux, uy = vx / d, vy / d  # direction
 
-    def add(x: str):
-        x = (x or "").strip()
-        if not x:
-            return
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
+    # base center is behind tip
+    bx = end.x - ux * ARROW_LEN
+    by = end.y - uy * ARROW_LEN
 
-    for u in cands:
-        add(u)
-        nu = _normalize_urlish(u)  # domain/path
-        add(nu)
-        add("https://" + nu)
-        add("http://" + nu)
-        add("www." + nu)
-        add("https://www." + nu)
-        add("http://www." + nu)
+    # perpendicular
+    px = -uy
+    py = ux
 
-    return out
+    p1 = fitz.Point(bx + px * ARROW_HALF_WIDTH, by + py * ARROW_HALF_WIDTH)
+    p2 = fitz.Point(bx - px * ARROW_HALF_WIDTH, by - py * ARROW_HALF_WIDTH)
+    tip = fitz.Point(end.x, end.y)
+
+    page.draw_polyline([p1, tip, p2, p1], color=RED, fill=RED, width=0.0)
+
+
+def _draw_line(page: fitz.Page, a: fitz.Point, b: fitz.Point):
+    page.draw_line(a, b, color=RED, width=LINE_WIDTH)
+
 
 # ============================================================
-# Keep-out detection (content blocks)
+# Connector endpoints (edge-to-edge with pullback)
 # ============================================================
 
-def _get_keepouts(page: fitz.Page) -> List[fitz.Rect]:
-    keepouts: List[fitz.Rect] = []
+def _edge_to_edge_points(callout_rect: fitz.Rect, target_rect: fitz.Rect) -> Tuple[fitz.Point, fitz.Point]:
+    tc = _center(target_rect)
+    cc = _center(callout_rect)
 
-    try:
-        for b in (page.get_text("blocks") or []):
-            x0, y0, x1, y1 = b[:4]
-            r = fitz.Rect(x0, y0, x1, y1)
-            if _rect_is_valid(r) and _rect_area(r) > 50:
-                keepouts.append(r)
-    except Exception:
-        pass
-
-    try:
-        for img in page.get_images(full=True) or []:
-            xref = img[0]
-            try:
-                r = page.get_image_bbox(xref)
-                if r and _rect_is_valid(r) and _rect_area(r) > 50:
-                    keepouts.append(fitz.Rect(r))
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    keepouts = _dedupe_rects(keepouts, pad=0.5)
-    keepouts = [inflate_rect(r, 1.5) for r in keepouts]
-    return keepouts
-
-# ============================================================
-# Margin lanes
-# ============================================================
-
-def _compute_equal_margins(page: fitz.Page) -> Tuple[fitz.Rect, fitz.Rect, fitz.Rect]:
-    pr = page.rect
-    text_area = _detect_actual_text_area(page)
-
-    left_available = max(0.0, text_area.x0 - EDGE_PAD)
-    right_available = max(0.0, (pr.width - EDGE_PAD) - text_area.x1)
-    lane_w = max(0.0, min(left_available, right_available))
-    lane_w = max(lane_w, 60.0)
-
-    left_lane = fitz.Rect(EDGE_PAD, EDGE_PAD, EDGE_PAD + lane_w, pr.height - EDGE_PAD)
-    right_lane = fitz.Rect(pr.width - EDGE_PAD - lane_w, EDGE_PAD, pr.width - EDGE_PAD, pr.height - EDGE_PAD)
-    return text_area, left_lane, right_lane
-
-def _rect_conflicts(r: fitz.Rect, occupied: List[fitz.Rect], pad: float = 0.0) -> bool:
-    rr = inflate_rect(r, pad) if pad else r
-    return any(rr.intersects(o) for o in occupied)
-
-# ============================================================
-# Leader routing + intersection scoring
-# ============================================================
-
-def _segment_intersects_rect(p0: fitz.Point, p1: fitz.Point, r: fitz.Rect) -> bool:
-    seg_bb = fitz.Rect(min(p0.x, p1.x), min(p0.y, p1.y), max(p0.x, p1.x), max(p0.y, p1.y))
-    if not seg_bb.intersects(r):
-        return False
-
-    steps = 12
-    for i in range(steps + 1):
-        t = i / steps
-        x = p0.x + (p1.x - p0.x) * t
-        y = p0.y + (p1.y - p0.y) * t
-        if r.contains(fitz.Point(x, y)):
-            return True
-    return False
-
-def _count_path_crossings(points: List[fitz.Point], keepouts: List[fitz.Rect]) -> int:
-    if len(points) < 2:
-        return 0
-    crosses = 0
-    for i in range(len(points) - 1):
-        a, b = points[i], points[i + 1]
-        for r in keepouts:
-            if _segment_intersects_rect(a, b, r):
-                crosses += 1
-    return crosses
-
-def _nearest_point_on_rect_edge(from_pt: fitz.Point, r: fitz.Rect) -> fitz.Point:
-    x = _clamp(from_pt.x, r.x0, r.x1)
-    y = _clamp(from_pt.y, r.y0, r.y1)
-    d_left = abs(x - r.x0)
-    d_right = abs(r.x1 - x)
-    d_top = abs(y - r.y0)
-    d_bot = abs(r.y1 - y)
-    m = min(d_left, d_right, d_top, d_bot)
-    if m == d_left:
-        return fitz.Point(r.x0, y)
-    if m == d_right:
-        return fitz.Point(r.x1, y)
-    if m == d_top:
-        return fitz.Point(x, r.y0)
-    return fitz.Point(x, r.y1)
-
-def _route_margin_first(
-    note_rect: fitz.Rect,
-    anchor_rect: fitz.Rect,
-    side: str,
-    page_rect: fitz.Rect,
-) -> List[fitz.Point]:
-    note_c = _center(note_rect)
-    anchor_c = _center(anchor_rect)
-
-    start = _nearest_point_on_rect_edge(anchor_c, note_rect)
-    end = _nearest_point_on_rect_edge(note_c, anchor_rect)
-
-    if side == "left":
-        gutter_x = min(note_rect.x1 + 6.0, page_rect.width * 0.22)
-        gutter_x = max(gutter_x, note_rect.x1 + 4.0)
+    cy = cc.y
+    if callout_rect.x1 <= target_rect.x0:
+        start = fitz.Point(callout_rect.x1, cy)
+    elif callout_rect.x0 >= target_rect.x1:
+        start = fitz.Point(callout_rect.x0, cy)
     else:
-        gutter_x = max(note_rect.x0 - 6.0, page_rect.width * 0.78)
-        gutter_x = min(gutter_x, note_rect.x0 - 4.0)
+        if cc.y < tc.y:
+            start = fitz.Point(cc.x, callout_rect.y1)
+        else:
+            start = fitz.Point(cc.x, callout_rect.y0)
 
-    waypoint = fitz.Point(gutter_x, end.y)
-    return [start, waypoint, end]
+    y_on_target = min(max(cy, target_rect.y0 + 1.0), target_rect.y1 - 1.0)
 
-def _draw_arrowhead(page: fitz.Page, tail: fitz.Point, tip: fitz.Point, color=RED):
-    dx = tip.x - tail.x
-    dy = tip.y - tail.y
-    ang = math.atan2(dy, dx)
-    a = math.radians(ARROW_ANGLE_DEG)
+    if callout_rect.x1 <= target_rect.x0:
+        end = fitz.Point(target_rect.x0, y_on_target)
+    elif callout_rect.x0 >= target_rect.x1:
+        end = fitz.Point(target_rect.x1, y_on_target)
+    else:
+        x_on_target = min(max(cc.x, target_rect.x0 + 1.0), target_rect.x1 - 1.0)
+        if cc.y < tc.y:
+            end = fitz.Point(x_on_target, target_rect.y0)
+        else:
+            end = fitz.Point(x_on_target, target_rect.y1)
 
-    p1 = fitz.Point(
-        tip.x - ARROW_LEN * math.cos(ang - a),
-        tip.y - ARROW_LEN * math.sin(ang - a),
-    )
-    p2 = fitz.Point(
-        tip.x - ARROW_LEN * math.cos(ang + a),
-        tip.y - ARROW_LEN * math.sin(ang + a),
-    )
+    end = _pull_back_point(start, end, ENDPOINT_PULLBACK)
+    return start, end
 
-    page.draw_line(p1, tip, color=color, width=LEADER_WIDTH)
-    page.draw_line(p2, tip, color=color, width=LEADER_WIDTH)
 
 # ============================================================
-# Callout placement (cost-based)
+# Multi-page routing: down the page margin(s) until target page
 # ============================================================
 
-@dataclass
-class CalloutPlan:
-    label: str
-    wrapped_text: str
-    fontsize: int
-    note_rect: fitz.Rect
-    anchor_rect: fitz.Rect
-    side: str
-    leader_points: List[fitz.Point]
-
-def _build_note_rect_in_lane(
-    lane: fitz.Rect,
-    page_rect: fitz.Rect,
-    label: str,
-    anchor_y: float,
-) -> Tuple[fitz.Rect, str, int]:
-    lane_w = lane.x1 - lane.x0
-    max_w = min(180.0, lane_w - 8.0)
-    max_w = max(max_w, 70.0)
-
-    fs, wrapped, w_used, h_needed = _optimize_layout_for_margin(label, max_w)
-    w_used = min(w_used, max_w)
-
-    x0 = lane.x0 + 4.0
-    x1 = min(lane.x1 - 4.0, x0 + w_used)
-
-    y0 = anchor_y - h_needed / 2.0
-    y1 = anchor_y + h_needed / 2.0
-    y0 = _clamp(y0, lane.y0, lane.y1 - h_needed)
-    y1 = y0 + h_needed
-
-    rect = fitz.Rect(x0, y0, x1, y1)
-    rect = _ensure_min_size(rect, page_rect, min_w=55.0, min_h=14.0)
-    return rect, wrapped, fs
-
-def _push_to_avoid(rect: fitz.Rect, occupied: List[fitz.Rect], lane: fitz.Rect) -> fitz.Rect:
-    if not occupied:
-        return rect
-
-    r = fitz.Rect(rect)
-
-    def collides(rr: fitz.Rect) -> bool:
-        return _rect_conflicts(rr, occupied, pad=GAP_BETWEEN_CALLOUTS)
-
-    step = 8.0
-    for _ in range(60):
-        if not collides(r):
-            return r
-        r = fitz.Rect(r.x0, r.y0 + step, r.x1, r.y1 + step)
-        if r.y1 > lane.y1:
-            break
-
-    r = fitz.Rect(rect)
-    for _ in range(60):
-        if not collides(r):
-            return r
-        r = fitz.Rect(r.x0, r.y0 - step, r.x1, r.y1 - step)
-        if r.y0 < lane.y0:
-            break
-
-    return fitz.Rect(rect)
-
-def _choose_anchor_rect(rects: List[fitz.Rect]) -> fitz.Rect:
+def _draw_multipage_connector(
+    doc: fitz.Document,
+    callout_page_index: int,
+    callout_rect: fitz.Rect,
+    target_page_index: int,
+    target_rect: fitz.Rect,
+):
     """
-    Choose ONE anchor rect from a cluster.
-    Default: rect closest to cluster centroid.
+    Draw:
+      - Page 1 (annotation page): from callout edge -> gutter point, then down to bottom
+      - Intermediate pages: vertical gutter line top->bottom
+      - Target page: gutter line top->target_y, then across to target edge, with arrowhead at end
     """
-    rects = _dedupe_rects(rects)
-    if not rects:
-        return fitz.Rect(0, 0, 0, 0)
-    centroid = _center(_union_rect(rects))
-    best = min(rects, key=lambda r: _dist(_center(r), centroid))
-    return fitz.Rect(best)
+    callout_page = doc.load_page(callout_page_index)
+    pr = callout_page.rect
 
-def _placement_score(
-    note_rect: fitz.Rect,
-    anchor_rect: fitz.Rect,
-    leader_points: List[fitz.Point],
-    keepouts: List[fitz.Rect],
-    occupied: List[fitz.Rect],
-    footer_no_go: fitz.Rect,
-) -> float:
-    note_c = _center(note_rect)
-    anch_c = _center(anchor_rect)
+    # Choose gutter based on which side callout is on
+    callout_c = _center(callout_rect)
+    gutter_side = "right" if callout_c.x >= pr.width / 2 else "left"
+    gutter_x = pr.width - EDGE_PAD if gutter_side == "right" else EDGE_PAD
 
-    dist_cost = _dist(note_c, anch_c)
-    cross_cost = _count_path_crossings(leader_points, keepouts)
-    shift_cost = abs(note_c.y - anch_c.y)
-    overlap_cost = 1.0 if _rect_conflicts(note_rect, occupied, pad=GAP_BETWEEN_CALLOUTS) else 0.0
-    footer_cost = 1.0 if (footer_no_go.width > 0 and footer_no_go.height > 0 and note_rect.intersects(footer_no_go)) else 0.0
+    # Page 1: from callout to gutter at same y, then down
+    union = target_rect
+    s, _ = _edge_to_edge_points(callout_rect, union)
 
-    return (
-        W_DIST * dist_cost
-        + W_CROSS * cross_cost
-        + W_SHIFT * shift_cost
-        + W_OVERLAP * overlap_cost
-        + W_FOOTER * footer_cost
-    )
+    y_start = min(max(s.y, EDGE_PAD), pr.height - EDGE_PAD)
+    p_gutter_start = fitz.Point(gutter_x, y_start)
+    p_gutter_bottom = fitz.Point(gutter_x, pr.height - EDGE_PAD)
 
-def _plan_callout_cost_based(
+    _draw_line(callout_page, s, p_gutter_start)
+    _draw_line(callout_page, p_gutter_start, p_gutter_bottom)
+
+    # Intermediate pages
+    for pi in range(callout_page_index + 1, target_page_index):
+        p = doc.load_page(pi)
+        pr_i = p.rect
+        gx = pr_i.width - EDGE_PAD if gutter_side == "right" else EDGE_PAD
+        _draw_line(p, fitz.Point(gx, EDGE_PAD), fitz.Point(gx, pr_i.height - EDGE_PAD))
+
+    # Target page: gutter top -> target_y, then across to target edge with arrowhead
+    tp = doc.load_page(target_page_index)
+    pr_t = tp.rect
+    gx_t = pr_t.width - EDGE_PAD if gutter_side == "right" else EDGE_PAD
+
+    tc = _center(target_rect)
+    y_target = min(max(tc.y, EDGE_PAD), pr_t.height - EDGE_PAD)
+
+    p_top = fitz.Point(gx_t, EDGE_PAD)
+    p_mid = fitz.Point(gx_t, y_target)
+
+    # End point on target edge (pulled back so arrow tip doesn't enter red box)
+    # We "pretend" start is at gutter point for pullback direction.
+    faux_start = fitz.Point(gx_t, y_target)
+    if gutter_side == "right":
+        end_raw = fitz.Point(target_rect.x1, min(max(y_target, target_rect.y0 + 1.0), target_rect.y1 - 1.0))
+    else:
+        end_raw = fitz.Point(target_rect.x0, min(max(y_target, target_rect.y0 + 1.0), target_rect.y1 - 1.0))
+
+    end = _pull_back_point(faux_start, end_raw, ENDPOINT_PULLBACK)
+
+    _draw_line(tp, p_top, p_mid)
+    _draw_line(tp, p_mid, end)
+
+    # Arrowhead: tip exactly at end
+    _draw_arrowhead(tp, p_mid, end)
+
+
+# ============================================================
+# Margin placement (unchanged behaviour; first-page callouts)
+# ============================================================
+
+def _place_annotation_in_margin(
     page: fitz.Page,
-    text_area: fitz.Rect,
-    left_lane: fitz.Rect,
-    right_lane: fitz.Rect,
-    keepouts: List[fitz.Rect],
-    occupied_left: List[fitz.Rect],
-    occupied_right: List[fitz.Rect],
+    targets: List[fitz.Rect],
+    occupied_callouts: List[fitz.Rect],
     label: str,
-    target_rects_on_page1: List[fitz.Rect],
-    preferred_side: Optional[str] = None,
-) -> Optional[CalloutPlan]:
+) -> Tuple[fitz.Rect, str, int, bool]:
+    text_area = _detect_actual_text_area(page)
     pr = page.rect
+    target_union = _union_rect(targets)
+    target_c = _center(target_union)
+    target_y = target_c.y
+
+    target_no_go = inflate_rect(target_union, GAP_FROM_HIGHLIGHTS)
     footer_no_go = fitz.Rect(NO_GO_RECT) & pr
 
-    rects = _dedupe_rects(target_rects_on_page1)
-    if not rects:
-        return None
+    MIN_CALLOUT_WIDTH = 55.0
+    MAX_CALLOUT_WIDTH = 180.0
+    EDGE_BUFFER = 8.0
+    MIN_H = 12.0
 
-    target_union = _union_rect(rects)
-    target_no_go = inflate_rect(target_union, GAP_FROM_HIGHLIGHTS)
+    left_lane = (EDGE_BUFFER, max(EDGE_BUFFER, text_area.x0 - EDGE_BUFFER))
+    right_lane = (min(pr.width - EDGE_BUFFER, text_area.x1 + EDGE_BUFFER), pr.width - EDGE_BUFFER)
 
-    anchor_rect = _choose_anchor_rect(rects)
-    anchor_y = _center(anchor_rect).y
+    lanes = []
+    lw = left_lane[1] - left_lane[0]
+    rw = right_lane[1] - right_lane[0]
+    if lw >= MIN_CALLOUT_WIDTH:
+        lanes.append(("left", left_lane[0], left_lane[1], lw))
+    if rw >= MIN_CALLOUT_WIDTH:
+        lanes.append(("right", right_lane[0], right_lane[1], rw))
 
-    def candidate(side: str) -> Optional[CalloutPlan]:
-        lane = left_lane if side == "left" else right_lane
-        occ = occupied_left if side == "left" else occupied_right
-
-        note_rect, wrapped, fs = _build_note_rect_in_lane(lane, pr, label, anchor_y)
-        note_rect = _push_to_avoid(note_rect, occ, lane)
-
-        if note_rect.intersects(text_area):
-            return None
-        if note_rect.intersects(target_no_go):
-            return None
-        if not lane.contains(note_rect):
-            return None
-
-        leader = _route_margin_first(note_rect, anchor_rect, side, pr)
-        return CalloutPlan(
-            label=label,
-            wrapped_text=wrapped,
-            fontsize=fs,
-            note_rect=note_rect,
-            anchor_rect=anchor_rect,
-            side=side,
-            leader_points=leader,
+    if not lanes:
+        fallback = fitz.Rect(
+            EDGE_BUFFER,
+            max(EDGE_BUFFER, target_y - 20),
+            EDGE_BUFFER + 120,
+            min(pr.height - EDGE_BUFFER, target_y + 20),
         )
+        return _ensure_min_size(fallback, pr), label, 8, False
 
-    candidates: List[CalloutPlan] = []
-    for side in ("left", "right"):
-        c = candidate(side)
-        if c:
-            candidates.append(c)
+    page_mid_x = pr.width / 2.0
+    target_side_pref = "left" if target_c.x < page_mid_x else "right"
+    lanes.sort(key=lambda t: 0 if t[0] == target_side_pref else 1)
 
-    if not candidates:
-        return None
+    occupied_buf = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied_callouts]
+    scan = [12, -12, 24, -24, 36, -36, 48, -48, 60, -60, 72, -72, 0]
 
-    scored: List[Tuple[float, CalloutPlan]] = []
-    for c in candidates:
-        occ = occupied_left if c.side == "left" else occupied_right
-        s = _placement_score(c.note_rect, c.anchor_rect, c.leader_points, keepouts, occ, footer_no_go)
-        if preferred_side and c.side == preferred_side:
-            s *= 0.92
-        scored.append((s, c))
+    best = None  # (score, rect, wrapped, fs, safe)
 
-    scored.sort(key=lambda x: x[0])
-    best = scored[0][1]
+    for side, x0_lane, x1_lane, lane_w in lanes:
+        usable_w = min(MAX_CALLOUT_WIDTH, lane_w)
+        fs, wrapped_text, w_used, h_needed = _optimize_layout_for_margin(label, usable_w)
+        w_used = min(w_used, usable_w)
+        if w_used < MIN_CALLOUT_WIDTH:
+            continue
 
-    if best.side == "left":
-        occupied_left.append(best.note_rect)
+        for dy in scan:
+            y0 = target_y + dy - h_needed / 2.0
+            y1 = target_y + dy + h_needed / 2.0
+
+            y0 = max(EDGE_BUFFER, y0)
+            y1 = min(pr.height - EDGE_BUFFER, y1)
+
+            if (y1 - y0) < MIN_H:
+                y1 = min(pr.height - EDGE_BUFFER, y0 + MIN_H)
+                if (y1 - y0) < MIN_H:
+                    y0 = max(EDGE_BUFFER, y1 - MIN_H)
+
+            if side == "left":
+                x1 = x1_lane - 5.0
+                x0 = max(x0_lane, x1 - w_used)
+            else:
+                x0 = x0_lane + 5.0
+                x1 = min(x1_lane, x0 + w_used)
+
+            cand = fitz.Rect(x0, y0, x1, y1)
+            cand = _ensure_min_size(cand, pr)
+
+            if cand.intersects(target_no_go):
+                continue
+            if cand.intersects(text_area):
+                continue
+            if footer_no_go.width > 0 and footer_no_go.height > 0 and cand.intersects(footer_no_go):
+                continue
+
+            conflicts = any(cand.intersects(o) for o in occupied_buf)
+            safe = not conflicts
+
+            dx = abs(_center(cand).x - target_c.x)
+            dy_zero_penalty = 5.0 if dy == 0 else 0.0
+            score = (0 if safe else 10_000) + dx * 0.8 + abs(dy) * 0.15 + dy_zero_penalty
+
+            if best is None or score < best[0]:
+                best = (score, cand, wrapped_text, fs, safe)
+
+            if safe and dy != 0:
+                return cand, wrapped_text, fs, True
+
+    if best:
+        _, cand, wrapped_text, fs, safe = best
+        return cand, wrapped_text, fs, safe
+
+    # last resort fallback
+    side, x0_lane, x1_lane, lane_w = lanes[0]
+    usable_w = min(MAX_CALLOUT_WIDTH, lane_w)
+    fs, wrapped_text, w_used, h_needed = _optimize_layout_for_margin(label, usable_w)
+    w_used = min(w_used, usable_w)
+
+    y0 = max(EDGE_BUFFER, target_y - h_needed / 2.0)
+    y1 = min(pr.height - EDGE_BUFFER, target_y + h_needed / 2.0)
+    if (y1 - y0) < MIN_H:
+        y1 = min(pr.height - EDGE_BUFFER, y0 + MIN_H)
+
+    if side == "left":
+        x1 = x1_lane - 5.0
+        x0 = max(x0_lane, x1 - w_used)
     else:
-        occupied_right.append(best.note_rect)
+        x0 = x0_lane + 5.0
+        x1 = min(x1_lane, x0 + w_used)
 
-    return best
+    cand = fitz.Rect(x0, y0, x1, y1)
 
-# ============================================================
-# Stars helper
-# ============================================================
+    if footer_no_go.width > 0 and footer_no_go.height > 0 and cand.intersects(footer_no_go):
+        shift = (cand.y1 - footer_no_go.y0) + EDGE_BUFFER
+        cand = _shift_rect_up(cand, shift, min_y=EDGE_BUFFER)
 
-_STAR_CRITERIA = {"3", "2_past", "4_past"}
+    cand = _ensure_min_size(cand, pr)
+    return cand, wrapped_text, fs, False
 
-def _find_high_star_tokens(page: fitz.Page) -> List[str]:
-    text = page.get_text("text") or ""
-    tokens: List[str] = []
-    for m in re.finditer(r"(?<!\*)\*{4,5}(?!\*)", text):
-        tokens.append(m.group(0))
-    for m in re.finditer(r"[★☆]{5}", text):
-        tok = m.group(0)
-        if tok.count("★") >= 4:
-            tokens.append(tok)
-    out: List[str] = []
-    seen = set()
-    for t in tokens:
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
 
 # ============================================================
-# Main entrypoint (connector-free)
+# Main annotation entrypoint
 # ============================================================
 
 def annotate_pdf_bytes(
     pdf_bytes: bytes,
     quote_terms: List[str],
     criterion_id: str,
-    meta: Dict[str, Any],
-    *,
-    preferred_side_by_label: Optional[Dict[str, str]] = None,
-) -> Tuple[bytes, Dict[str, Any]]:
-    """
-    Pipeline:
-      1) Draw red rectangles around hits (quotes/meta/stars).
-      2) On page 1: place margin callouts in left/right lanes via cost scoring.
-      3) Draw callouts (white box + red text) AND leader lines with arrowheads to an anchor highlight.
-
-    Changes in this version:
-      - URL: uses variants + BEST-OCCURRENCE scoring (header preferred, footer avoided).
-      - Venue/Ensemble/Date: picks BEST occurrence on page 1 (boxes once).
-    """
+    meta: Dict,
+) -> Tuple[bytes, Dict]:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     if len(doc) == 0:
         return pdf_bytes, {}
@@ -800,197 +697,174 @@ def annotate_pdf_bytes(
 
     total_quote_hits = 0
     total_meta_hits = 0
+    occupied_callouts: List[fitz.Rect] = []
 
-    text_area, left_lane, right_lane = _compute_equal_margins(page1)
-    keepouts_p1 = _get_keepouts(page1)
+    # Track quote hits with page index for multi-page connectors
+    quote_hits_by_page: Dict[int, List[fitz.Rect]] = {}
 
-    occupied_left: List[fitz.Rect] = []
-    occupied_right: List[fitz.Rect] = []
-    plans: List[CalloutPlan] = []
+    # A) Quote highlights (all pages) + dedupe per page
+    for page_index in range(doc.page_count):
+        page = doc.load_page(page_index)
+        page_hits: List[fitz.Rect] = []
 
-    # ------------------------------------------------------------
-    # 1) Quote highlights (UNCHANGED)
-    # ------------------------------------------------------------
-    meta_url = (meta.get("source_url") or "").strip()
-    for page in doc:
         for term in (quote_terms or []):
-            t = (term or "").strip()
-            if not t:
-                continue
+            rects = _search_term(page, term)
+            page_hits.extend(rects)
 
-            is_url_term = _looks_like_url(t) or (meta_url and _is_same_urlish(t, meta_url))
-            if is_url_term and page.number != 0:
-                continue
+        page_hits = _dedupe_rects(page_hits, pad=1.0)
+        if page_hits:
+            quote_hits_by_page[page_index] = page_hits
 
-            rects = _search_term(page, t)
-            for r in _dedupe_rects(rects):
-                page.draw_rect(r, color=RED, width=BOX_WIDTH)
-                total_quote_hits += 1
+        for r in page_hits:
+            page.draw_rect(r, color=RED, width=BOX_WIDTH)
+            total_quote_hits += 1
 
-    # ------------------------------------------------------------
-    # 2) Metadata highlighting + callouts
-    # ------------------------------------------------------------
+    # B) Metadata callouts (page 1) — targets can exist on any page now
+    connectors_to_draw = []  # list of dicts
+
+    def _find_targets_across_doc(needle: str) -> List[Tuple[int, fitz.Rect]]:
+        out: List[Tuple[int, fitz.Rect]] = []
+        if not needle.strip():
+            return out
+
+        for pi in range(doc.page_count):
+            p = doc.load_page(pi)
+            try:
+                rects = p.search_for(needle)
+            except Exception:
+                rects = []
+            for r in rects:
+                out.append((pi, r))
+        return out
 
     def _do_job(
         label: str,
         value: Optional[str],
-        variants: Optional[List[str]] = None,
         *,
-        kind: str = "generic",
-        single_best: bool = True,
-        page1_only: bool = True,
+        connect_policy: str = "union",  # "single" | "union" | "all"
+        also_try_variants: Optional[List[str]] = None,
     ):
-        """
-        single_best=True:
-          - boxes only the best occurrence on page 1
-          - callout anchored to that occurrence
-        """
-        nonlocal total_meta_hits, plans
+        nonlocal total_meta_hits
 
-        val_str = str(value or "").strip()
-        if not val_str:
+        needles: List[str] = []
+        if value and str(value).strip():
+            needles.append(str(value).strip())
+        if also_try_variants:
+            for v in also_try_variants:
+                vv = (v or "").strip()
+                if vv:
+                    needles.append(vv)
+
+        needles = list(dict.fromkeys(needles))
+        if not needles:
             return
 
-        needles = list(dict.fromkeys([val_str] + (variants or [])))
+        # Find targets across ALL pages (then dedupe per page)
+        targets_by_page: Dict[int, List[fitz.Rect]] = {}
+        for needle in needles:
+            hits = _find_targets_across_doc(needle)
+            for pi, r in hits:
+                targets_by_page.setdefault(pi, []).append(r)
 
-        # Collect rects on page 1 only (matches your manual behavior)
-        rects_p1: List[fitz.Rect] = []
-        for n in needles:
-            rects_p1.extend(_search_term(page1, n))
+        # Deduplicate per page
+        cleaned_targets_by_page: Dict[int, List[fitz.Rect]] = {}
+        for pi, rects in targets_by_page.items():
+            deduped = _dedupe_rects(rects, pad=1.0)
+            if deduped:
+                cleaned_targets_by_page[pi] = deduped
 
-        rects_p1 = _dedupe_rects(rects_p1)
-        if not rects_p1:
+        if not cleaned_targets_by_page:
             return
 
-        if single_best:
-            best = _pick_best_rect(page1, rects_p1, kind=kind)  # header preferred, footer avoided
-            if not best:
-                return
-            # Draw ONE box
-            page1.draw_rect(best, color=RED, width=BOX_WIDTH)
-            total_meta_hits += 1
-            anchor_rects = [best]
-        else:
-            # Draw all (rarely desired for your workflow)
-            for r in rects_p1:
-                page1.draw_rect(r, color=RED, width=BOX_WIDTH)
+        # Draw red boxes on all pages where found
+        for pi, rects in cleaned_targets_by_page.items():
+            p = doc.load_page(pi)
+            for r in rects:
+                p.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_meta_hits += 1
-            anchor_rects = rects_p1
 
-        preferred = preferred_side_by_label.get(label) if preferred_side_by_label else None
+        # Place the annotation (callout) on page 1
+        # For placement heuristics, we use the union of page-1 targets if any, else union of first found page.
+        if 0 in cleaned_targets_by_page:
+            placement_targets = cleaned_targets_by_page[0]
+        else:
+            first_pi = sorted(cleaned_targets_by_page.keys())[0]
+            placement_targets = cleaned_targets_by_page[first_pi]
 
-        plan = _plan_callout_cost_based(
-            page1,
-            text_area=text_area,
-            left_lane=left_lane,
-            right_lane=right_lane,
-            keepouts=keepouts_p1,
-            occupied_left=occupied_left,
-            occupied_right=occupied_right,
-            label=label,
-            target_rects_on_page1=anchor_rects,  # anchor(s)
-            preferred_side=preferred,
+        callout_rect, wrapped_text, fs, _safe = _place_annotation_in_margin(
+            page1, placement_targets, occupied_callouts, label
         )
-        if plan:
-            plans.append(plan)
 
-    # --- URL: use variants and best-occurrence scoring ---
-    _do_job(
-        "Original source of publication.",
-        meta.get("source_url"),
-        variants=_url_variants_from_meta(meta),
-        kind="url",
-        single_best=True,
-        page1_only=True,
-    )
+        footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
+        if footer_no_go.width > 0 and footer_no_go.height > 0 and callout_rect.intersects(footer_no_go):
+            shift = (callout_rect.y1 - footer_no_go.y0) + EDGE_PAD
+            callout_rect = _shift_rect_up(callout_rect, shift, min_y=EDGE_PAD)
 
-    # --- Venue/Ensemble/Date: box once (best occurrence) ---
-    _do_job(
-        "Venue is distinguished organization.",
-        meta.get("venue_name"),
-        kind="entity",
-        single_best=True,
-        page1_only=True,
-    )
-    _do_job(
-        "Ensemble is distinguished organization.",
-        meta.get("ensemble_name"),
-        kind="entity",
-        single_best=True,
-        page1_only=True,
-    )
-    _do_job(
-        "Performance date.",
-        meta.get("performance_date"),
-        kind="date",
-        single_best=True,
-        page1_only=True,
-    )
+        callout_rect = _ensure_min_size(callout_rect, page1.rect)
+        if not _rect_is_valid(callout_rect):
+            return
 
-    # Beneficiary: often you *do* want multiple variants; still choose best occurrence for the callout anchor
-    _do_job(
-        "Beneficiary lead role evidence.",
-        meta.get("beneficiary_name"),
-        variants=meta.get("beneficiary_variants"),
-        kind="entity",
-        single_best=True,
-        page1_only=True,
-    )
+        # White backing + text
+        page1.draw_rect(callout_rect, color=WHITE, fill=WHITE, overlay=True)
 
-    # ------------------------------------------------------------
-    # 3) Stars (optional criterion) — choose best on page 1
-    # ------------------------------------------------------------
-    if criterion_id in _STAR_CRITERIA:
-        stars_rects_p1: List[fitz.Rect] = []
-        for tok in _find_high_star_tokens(page1):
-            stars_rects_p1.extend(page1.search_for(tok) or [])
-
-        stars_rects_p1 = _dedupe_rects(stars_rects_p1)
-        if stars_rects_p1:
-            best = _pick_best_rect(page1, stars_rects_p1, kind="generic")
-            if best:
-                page1.draw_rect(best, color=RED, width=BOX_WIDTH)
-                total_quote_hits += 1
-
-                label = "Highly acclaimed review of the distinguished performance."
-                preferred = preferred_side_by_label.get(label) if preferred_side_by_label else None
-                plan = _plan_callout_cost_based(
-                    page1,
-                    text_area=text_area,
-                    left_lane=left_lane,
-                    right_lane=right_lane,
-                    keepouts=keepouts_p1,
-                    occupied_left=occupied_left,
-                    occupied_right=occupied_right,
-                    label=label,
-                    target_rects_on_page1=[best],
-                    preferred_side=preferred,
-                )
-                if plan:
-                    plans.append(plan)
-
-    # ------------------------------------------------------------
-    # 4) Draw callouts + leaders last (arrows are already drawn here)
-    # ------------------------------------------------------------
-    for plan in plans:
-        page1.draw_rect(plan.note_rect, color=WHITE, fill=WHITE, overlay=True)
-
-        _insert_textbox_fit(
+        final_rect, _ret, _final_fs = _insert_textbox_fit(
             page1,
-            plan.note_rect,
-            plan.wrapped_text,
+            callout_rect,
+            wrapped_text,
             fontname=FONTNAME,
-            fontsize=plan.fontsize,
+            fontsize=fs,
             color=RED,
+            align=fitz.TEXT_ALIGN_LEFT,
             overlay=True,
         )
 
-        pts = plan.leader_points
-        for i in range(len(pts) - 1):
-            page1.draw_line(pts[i], pts[i + 1], color=RED, width=LEADER_WIDTH)
+        occupied_callouts.append(final_rect)
 
-        if len(pts) >= 2:
-            _draw_arrowhead(page1, pts[-2], pts[-1], color=RED)
+        # Store connector instructions to draw after all callouts exist
+        connectors_to_draw.append(
+            {
+                "final_rect": final_rect,
+                "connect_policy": connect_policy,
+                "targets_by_page": cleaned_targets_by_page,
+            }
+        )
+
+    # --- Meta labels (now includes ensemble) ---
+    _do_job("Original source of publication.", meta.get("source_url"), connect_policy="all")
+    _do_job("Venue / distinguished organisation.", meta.get("venue_name"), connect_policy="all")
+    _do_job("Ensemble / performing organisation.", meta.get("ensemble_name"), connect_policy="all")
+    _do_job("Performance date.", meta.get("performance_date"), connect_policy="all")
+
+    # Beneficiary targets (still value-driven)
+    _do_job(
+        "Beneficiary lead role evidence.",
+        meta.get("beneficiary_name"),
+        connect_policy="all",
+        also_try_variants=meta.get("beneficiary_variants") or [],
+    )
+
+    # Second pass: draw connectors AFTER all callouts exist
+    for item in connectors_to_draw:
+        final_rect = item["final_rect"]
+        targets_by_page = item["targets_by_page"]
+        connect_policy = item["connect_policy"]
+
+        # Draw connectors to ALL targets across pages, routed down margins if needed.
+        # NOTE: callout is always on page 0.
+        callout_page_index = 0
+
+        for pi, rects in targets_by_page.items():
+            if connect_policy == "single" and rects:
+                rects = rects[:1]
+
+            for r in rects:
+                if pi == 0:
+                    # Same-page: simple line + arrowhead
+                    s, e = _edge_to_edge_points(final_rect, r)
+                    page1.draw_line(s, e, color=RED, width=LINE_WIDTH)
+                    _draw_arrowhead(page1, s, e)
+                else:
+                    _draw_multipage_connector(doc, callout_page_index, final_rect, pi, r)
 
     out = io.BytesIO()
     doc.save(out)
@@ -1001,5 +875,4 @@ def annotate_pdf_bytes(
         "total_quote_hits": total_quote_hits,
         "total_meta_hits": total_meta_hits,
         "criterion_id": criterion_id,
-        "callouts_drawn": len(plans),
     }
