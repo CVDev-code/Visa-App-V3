@@ -109,11 +109,31 @@ Variants: {name_variants}
 Search Results:
 {search_results}
 
+CRITICAL O-1 VISA REQUIREMENTS:
+You must identify sources that will satisfy USCIS adjudicators under 8 CFR 214.4.
+
+For Criterion 3 (Reviews):
+- PRIORITIZE: Notable trade press (Gramophone, Opera News, Musical America, Bachtrack, Seen and Heard International)
+- PRIORITIZE: Major reputable news (New York Times, Guardian, Financial Times, Washington Post)
+- The review must describe the artist in a PRESTIGIOUS or LEAD role (principal, soloist, leading role)
+- OR the review must be about a performance at a DISTINGUISHED venue (Met Opera, Royal Opera, Berlin Phil, major festivals)
+- REJECT: Local papers, blogs, amateur reviews, minor venues
+
+For Criteria 2 & 4 (Distinguished Performances/Organizations):
+- Must document performances at venues known to be internationally distinguished
+- Must show the artist had a lead/critical/prominent role
+- Examples of distinguished: Metropolitan Opera, Royal Opera House, Berlin Philharmonic, Vienna State Opera, Salzburg Festival, Glyndebourne
+- REJECT: Community theaters, student performances, small local venues
+
+For Criterion 1 (Awards):
+- Must be from the OFFICIAL award-granting body (not news about awards)
+- Must be nationally or internationally recognized competitions/awards
+
 For each result, determine:
-1. Is it relevant to this criterion?
-2. Does it mention the artist?
-3. Is it from a credible/prestigious source?
-4. What specific evidence does it provide?
+1. Is the source credible and prestigious enough for O-1 purposes?
+2. Does it clearly mention the artist by name?
+3. Does it show the artist in a lead/prominent role OR at a distinguished venue?
+4. What SPECIFIC evidence does it provide that USCIS would find compelling?
 
 Return JSON:
 {{
@@ -121,17 +141,15 @@ Return JSON:
     {{
       "url": "https://...",
       "title": "...",
-      "source": "Publication name",
-      "relevance": "Why this supports the criterion",
-      "excerpt": "Brief quote showing evidence"
+      "source": "Publication name (e.g., 'The Guardian', 'Gramophone')",
+      "relevance": "Explain WHY this satisfies the O-1 criterion - be specific about role/venue/recognition",
+      "excerpt": "Quote 1-2 sentences that show the artist's prominence or venue's prestige"
     }}
   ]
 }}
 
-Only include sources that are:
-- Clearly relevant to the criterion
-- From prestigious/credible sources
-- Actually mention the artist (or their performances/work)"""
+IMPORTANT: Only include sources that would genuinely satisfy USCIS under 8 CFR 214.4. Quality over quantity.
+If a source is from a minor publication or doesn't show distinguished achievement, EXCLUDE it."""
 
 
 def ai_search_for_evidence(
@@ -265,40 +283,66 @@ def _generate_query_for_criterion(
     artist_name: str,
     name_variants: List[str]
 ) -> str:
-    """Generate an optimized search query for the criterion."""
+    """
+    Generate an optimized search query for the criterion.
+    
+    Uses detailed O-1 visa specific search strategies based on 8 CFR 214.4 requirements.
+    """
     
     # Use primary name or first variant
     search_name = artist_name or (name_variants[0] if name_variants else "")
     
-    # Criterion-specific query templates
+    if not search_name:
+        return ""
+    
+    # O-1 VISA SPECIFIC CRITERION SEARCHES
+    
     if criterion_id == "1":
-        # Awards - search official sources
-        return f'"{search_name}" award winner announcement'
+        # Criterion 1: Awards and Prizes
+        # Search for official announcements from award-granting bodies
+        return f'{search_name} award winner OR prize recipient OR competition winner OR laureate announcement'
     
     elif criterion_id == "3":
-        # Reviews - search major publications
-        return f'"{search_name}" review opera OR concert site:nytimes.com OR site:theguardian.com OR site:gramophone.co.uk OR site:bachtrack.com'
+        # Criterion 3: National/International Recognition via Critical Reviews
+        # PRIORITY: Trade press + major news outlets covering internationally recognized performances
+        # Your exact approach: reviews where artist is in prestigious/lead role OR performing at distinguished venues
+        return f'{search_name} review OR critique performance lead role OR principal OR soloist distinguished venue OR prestigious production major opera house OR philharmonic OR symphony'
     
-    elif criterion_id in ["2_past", "4_past"]:
-        # Past performances at distinguished venues
-        return f'"{search_name}" performed at Metropolitan Opera OR Royal Opera OR Berlin Philharmonic OR Vienna State Opera'
+    elif criterion_id == "2_past":
+        # Criterion 2 Past: Lead/Starring role in PAST productions with distinguished reputation
+        # Search for past performances where they had a lead role at distinguished venues
+        return f'{search_name} performed lead role OR principal OR soloist OR starring Metropolitan Opera OR Royal Opera OR Berlin Philharmonic OR Vienna State Opera OR Salzburg Festival OR Glyndebourne'
     
-    elif criterion_id in ["2_future", "4_future"]:
-        # Future performances at distinguished venues
-        return f'"{search_name}" upcoming performance OR season announcement site:metopera.org OR site:roh.org.uk OR site:operabase.com'
+    elif criterion_id == "2_future":
+        # Criterion 2 Future: Lead/Starring role in FUTURE productions with distinguished reputation
+        # Search for announcements of upcoming performances in lead roles
+        return f'{search_name} upcoming OR will perform OR announced OR season 2025 OR 2026 lead role OR principal OR soloist Metropolitan Opera OR Royal Opera OR major venue'
+    
+    elif criterion_id == "4_past":
+        # Criterion 4 Past: Lead/critical role for PAST distinguished organizations
+        # Search for documented past work with distinguished organizations
+        return f'{search_name} performed with OR appeared at distinguished organization OR prestigious ensemble OR major opera company OR symphony orchestra'
+    
+    elif criterion_id == "4_future":
+        # Criterion 4 Future: Lead/critical role for FUTURE distinguished organizations
+        # Search for future engagements with distinguished organizations
+        return f'{search_name} will perform OR upcoming engagement OR announced season distinguished venue OR prestigious company OR major festival'
     
     elif criterion_id == "5":
-        # Commercial/critical success
-        return f'"{search_name}" acclaimed OR success OR bestselling OR award-winning'
+        # Criterion 5: Record of commercial or critically acclaimed successes
+        # Search for evidence of major success, sold-out performances, recordings
+        return f'{search_name} sold out OR box office success OR critically acclaimed OR chart-topping OR bestselling recording OR major success'
     
     elif criterion_id == "6":
-        # Recognition from experts
-        return f'"{search_name}" praised by OR recognized by OR expert opinion'
+        # Criterion 6: Recognition from organizations, critics, and experts
+        # Search for praise and recognition from credible sources
+        return f'{search_name} praised by OR recognized by OR acclaimed by critic OR expert OR organization award OR honor OR recognition'
     
     elif criterion_id == "7":
-        # High salary/compensation
-        return f'"{search_name}" contract OR fee OR salary OR compensation'
+        # Criterion 7: High salary or substantial remuneration
+        # Search for evidence of high-level contracts and engagements
+        return f'{search_name} contract OR engagement fee OR appearance OR residency major venue OR international tour'
     
     else:
         # Generic fallback
-        return f'"{search_name}" {criterion_desc[:50]}'
+        return f'{search_name} opera OR performance OR concert review'
