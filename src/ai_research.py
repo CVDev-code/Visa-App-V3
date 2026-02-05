@@ -160,44 +160,56 @@ def ai_search_for_evidence(
     results_by_criterion = {}
     
     for cid in selected_criteria:
-        criterion_desc = criteria_descriptions.get(cid, "")
-        
-        # Generate search query for this criterion
-        search_query = _generate_query_for_criterion(
-            cid, criterion_desc, artist_name, name_variants
-        )
-        
-        # Apply feedback if regenerating
-        if feedback:
-            rejected = feedback.get("rejected_urls", [])
-            user_feedback = feedback.get("user_feedback", "")
-            if user_feedback:
-                search_query += f" {user_feedback}"
-        
-        print(f"[Criterion {cid}] Searching: {search_query}")
-        
-        # Search with Tavily - get MORE results (10-15)
-        search_results = _search_with_tavily(search_query, max_results=15)
-        
-        if not search_results:
-            print(f"[Criterion {cid}] No results from Tavily")
-            continue
-        
-        # Use OpenAI to analyze which results are most relevant
-        search_results_text = "\n\n".join([
-            f"URL: {r['url']}\nTitle: {r['title']}\nContent Preview: {r['content'][:500]}..."
-            for r in search_results
-        ])
-        
-        prompt = ANALYSIS_PROMPT_TEMPLATE.format(
-            criterion_id=cid,
-            criterion_description=criterion_desc,
-            artist_name=artist_name,
-            name_variants=", ".join(name_variants) if name_variants else "None",
-            search_results=search_results_text
-        )
-        
         try:
+            criterion_desc = criteria_descriptions.get(cid, "")
+            if not criterion_desc:
+                print(f"[Criterion {cid}] No description found, skipping")
+                continue
+            
+            # Generate search query for this criterion
+            search_query = _generate_query_for_criterion(
+                cid, criterion_desc, artist_name, name_variants
+            )
+            
+            if not search_query:
+                print(f"[Criterion {cid}] Could not generate query, skipping")
+                continue
+            
+            # Apply feedback if regenerating
+            if feedback:
+                rejected = feedback.get("rejected_urls", [])
+                user_feedback = feedback.get("user_feedback", "")
+                if user_feedback:
+                    search_query += f" {user_feedback}"
+            
+            print(f"[Criterion {cid}] Searching: {search_query}")
+            
+            # Search with Tavily - get MORE results (10-15)
+            search_results = _search_with_tavily(search_query, max_results=15)
+            
+            if not search_results:
+                print(f"[Criterion {cid}] No results from Tavily")
+                continue
+            
+            # Use OpenAI to analyze which results are most relevant
+            search_results_text = "\n\n".join([
+                f"URL: {r.get('url', 'N/A')}\nTitle: {r.get('title', 'N/A')}\nContent Preview: {r.get('content', '')[:500]}..."
+                for r in search_results
+                if r and isinstance(r, dict)
+            ])
+            
+            if not search_results_text:
+                print(f"[Criterion {cid}] Could not format search results")
+                continue
+            
+            prompt = ANALYSIS_PROMPT_TEMPLATE.format(
+                criterion_id=cid,
+                criterion_description=criterion_desc,
+                artist_name=artist_name,
+                name_variants=", ".join(name_variants) if name_variants else "None",
+                search_results=search_results_text
+            )
+            
             resp = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -207,26 +219,42 @@ def ai_search_for_evidence(
                 response_format={"type": "json_object"}
             )
             
-            raw = resp.choices[0].message.content or "{}"
+            raw = resp.choices[0].message.content
+            if not raw:
+                print(f"[Criterion {cid}] No content in OpenAI response")
+                continue
+                
             data = json.loads(raw)
             
             relevant = data.get("relevant_sources", [])
-            if relevant:
-                # Add full content from Tavily results
-                for item in relevant:
-                    url = item.get("url", "")
-                    # Find matching Tavily result to get full content
-                    for tavily_result in search_results:
-                        if tavily_result["url"] == url:
-                            item["full_content"] = tavily_result["content"]
-                            break
-                
-                results_by_criterion[cid] = relevant[:10]  # Top 10
-                print(f"[Criterion {cid}] Found {len(relevant)} relevant sources")
+            if not relevant or not isinstance(relevant, list):
+                print(f"[Criterion {cid}] No relevant sources found")
+                continue
+            
+            # Add full content from Tavily results
+            for item in relevant:
+                if not isinstance(item, dict):
+                    continue
+                url = item.get("url", "")
+                if not url:
+                    continue
+                # Find matching Tavily result to get full content
+                for tavily_result in search_results:
+                    if tavily_result and isinstance(tavily_result, dict) and tavily_result.get("url") == url:
+                        item["full_content"] = tavily_result.get("content", "")
+                        break
+            
+            results_by_criterion[cid] = relevant[:10]  # Top 10
+            print(f"[Criterion {cid}] Found {len(relevant)} relevant sources")
         
         except Exception as e:
-            print(f"[Criterion {cid}] Analysis error: {e}")
+            print(f"[Criterion {cid}] Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             continue
+    
+    if not results_by_criterion:
+        raise RuntimeError("No results found for any criterion. Check that artist name is correct and has online presence.")
     
     return results_by_criterion
 
