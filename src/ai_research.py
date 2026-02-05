@@ -52,32 +52,33 @@ def _search_with_tavily(query: str, max_results: int = 5) -> List[Dict]:
             query=query,
             search_depth="advanced",  # Get more comprehensive results
             max_results=max_results,
-            include_raw_content=True,  # Get full article text
-            include_domains=[
-                # Prestigious publications for reviews
-                "nytimes.com", "theguardian.com", "ft.com", 
-                "gramophone.co.uk", "operanews.com", "musicalamerica.com",
-                "bachtrack.com", "seen-and-heard-international.com",
-                # Major venues/opera houses
-                "metopera.org", "roh.org.uk", "wiener-staatsoper.at",
-                "operadeparis.fr", "berliner-philharmoniker.de",
-                # Performance databases
-                "operabase.com", "operawire.com"
-            ],
-            exclude_domains=[
-                # Exclude low-quality sources
-                "wikipedia.org", "facebook.com", "twitter.com", 
-                "instagram.com", "youtube.com"
-            ]
+            include_raw_content=True  # Get full article text
+            # Removed strict domain filters - too restrictive
+            # Let Tavily use its own quality ranking
         )
         
+        # Check response is valid
+        if not response or not isinstance(response, dict):
+            print(f"[Tavily] Invalid response: {response}")
+            return []
+        
         results = []
-        for item in response.get("results", []):
+        raw_results = response.get("results")
+        
+        # Check results exist and are a list
+        if not raw_results or not isinstance(raw_results, list):
+            print(f"[Tavily] No results or invalid results format")
+            return []
+        
+        for item in raw_results:
+            if not item or not isinstance(item, dict):
+                continue
             results.append({
                 "url": item.get("url", ""),
                 "title": item.get("title", ""),
                 "content": item.get("raw_content", item.get("content", "")),
                 "score": item.get("score", 0.0)
+            })
             })
         
         return results
