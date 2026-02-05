@@ -176,8 +176,8 @@ def ai_search_for_evidence(
         
         print(f"[Criterion {cid}] Searching: {search_query}")
         
-        # Search with Tavily
-        search_results = _search_with_tavily(search_query, max_results=8)
+        # Search with Tavily - get MORE results (10-15)
+        search_results = _search_with_tavily(search_query, max_results=15)
         
         if not search_results:
             print(f"[Criterion {cid}] No results from Tavily")
@@ -221,7 +221,7 @@ def ai_search_for_evidence(
                             item["full_content"] = tavily_result["content"]
                             break
                 
-                results_by_criterion[cid] = relevant[:5]  # Top 5
+                results_by_criterion[cid] = relevant[:10]  # Top 10
                 print(f"[Criterion {cid}] Found {len(relevant)} relevant sources")
         
         except Exception as e:
