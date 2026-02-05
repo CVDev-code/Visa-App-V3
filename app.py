@@ -14,7 +14,7 @@ from src.metadata import (
 from src.openai_terms import suggest_ovisa_quotes
 from src.pdf_highlighter import annotate_pdf_bytes
 from src.prompts import CRITERIA
-from src.research_ui import render_research_tab
+from src.research_ui_enhanced import render_research_tab
 
 load_dotenv()
 st.set_page_config(page_title="O-1 Evidence Assistant", layout="wide")
@@ -22,7 +22,50 @@ st.set_page_config(page_title="O-1 Evidence Assistant", layout="wide")
 st.title("O-1 Evidence Assistant")
 st.caption("Research evidence online, then upload and highlight PDFs for your O-1 petition")
 
-# Create tabs
+# ========================================
+# SIDEBAR: Unified Configuration
+# ========================================
+with st.sidebar:
+    st.header("⚙️ Case Configuration")
+    st.markdown("*These settings apply to both tabs*")
+    
+    # Beneficiary Information
+    st.subheader("Beneficiary")
+    beneficiary_name = st.text_input("Full name", value="", key="beneficiary_name_input")
+    variants_raw = st.text_input("Name variants (comma-separated)", value="", key="variants_input")
+    beneficiary_variants = [v.strip() for v in variants_raw.split(",") if v.strip()]
+    
+    # Store in session state for both tabs
+    st.session_state["beneficiary_name"] = beneficiary_name
+    st.session_state["beneficiary_variants"] = beneficiary_variants
+    
+    st.divider()
+    
+    # Unified Criteria Selection
+    st.subheader("O-1 Criteria")
+    st.caption("Select criteria for research AND highlighting")
+    
+    default_criteria = ["2_past", "2_future", "3", "4_past", "4_future"]
+    selected_criteria_ids: list[str] = []
+    
+    for cid, desc in CRITERIA.items():
+        checked = st.checkbox(
+            f"**({cid})** {desc[:50]}...",  # Truncate for sidebar
+            value=(cid in default_criteria),
+            key=f"unified_crit_{cid}"
+        )
+        if checked:
+            selected_criteria_ids.append(cid)
+    
+    # Store in session state for both tabs
+    st.session_state["selected_criteria"] = selected_criteria_ids
+    
+    st.divider()
+    st.caption("💡 Tip: Select criteria once - they'll be used in both Research and PDF Highlighter tabs")
+
+# ========================================
+# TABS
+# ========================================
 tab1, tab2 = st.tabs(["🔍 Research Assistant", "📄 PDF Highlighter"])
 
 # ========================================
@@ -32,49 +75,58 @@ with tab1:
     render_research_tab()
 
 # ========================================
-# TAB 2: PDF HIGHLIGHTER (Original App)
+# TAB 2: PDF HIGHLIGHTER
 # ========================================
 with tab2:
     st.caption(
-        "Upload PDFs → choose criteria → approve/reject quotes → export criterion-specific highlighted PDFs"
+        "Upload PDFs (or use converted ones from Research tab) → approve/reject quotes → export highlighted PDFs"
     )
 
-    # -------------------------
-    # Case setup (sidebar)
-    # -------------------------
-    with st.sidebar:
-        st.header("Case setup")
-        beneficiary_name = st.text_input("Beneficiary full name", value="")
-        variants_raw = st.text_input("Name variants (comma-separated)", value="")
-        beneficiary_variants = [v.strip() for v in variants_raw.split(",") if v.strip()]
-
-        st.subheader("Select O-1 criteria to extract")
-        default_criteria = ["2_past", "2_future", "3", "4_past", "4_future"]
-        selected_criteria_ids: list[str] = []
-        for cid, desc in CRITERIA.items():
-            checked = st.checkbox(f"({cid}) {desc}", value=(cid in default_criteria), key=f"pdf_crit_{cid}")
-            if checked:
-                selected_criteria_ids.append(cid)
-
-        st.divider()
-        st.caption("Tip: Tick only the criteria you want to build evidence for in this batch.")
-
+    # Check if we have PDFs from Research tab
+    research_pdfs = st.session_state.get("research_pdfs", {})
+    has_research_pdfs = any(research_pdfs.values())
+    
+    if has_research_pdfs:
+        st.success(f"""
+        ✅ {sum(len(pdfs) for pdfs in research_pdfs.values())} PDFs ready from Research tab!
+        
+        These PDFs will be automatically processed. You can also upload additional PDFs below.
+        """)
+    
+    # File uploader (can still upload additional files)
     uploaded_files = st.file_uploader(
-        "Upload one or more PDF files",
+        "Upload additional PDF files (optional if using Research PDFs)",
         type=["pdf"],
         accept_multiple_files=True,
     )
-
-    if not uploaded_files:
-        st.info("Upload at least one PDF to begin.")
+    
+    # Combine uploaded files with research PDFs
+    all_files = []
+    
+    # Add uploaded files
+    if uploaded_files:
+        all_files.extend(uploaded_files)
+    
+    # Add research PDFs as virtual files
+    if research_pdfs:
+        for criterion_id, pdfs_dict in research_pdfs.items():
+            for filename, pdf_bytes in pdfs_dict.items():
+                # Create a virtual file object
+                virtual_file = io.BytesIO(pdf_bytes)
+                virtual_file.name = f"[Research] {filename}"
+                virtual_file.seek(0)
+                all_files.append(virtual_file)
+    
+    if not all_files:
+        st.info("👆 Upload PDFs or convert documents in the Research tab to begin.")
         st.stop()
 
     if not beneficiary_name.strip():
-        st.warning("Enter the beneficiary full name in the sidebar to improve extraction accuracy.")
+        st.warning("⚠️ Enter the beneficiary full name in the sidebar.")
         st.stop()
 
     if not selected_criteria_ids:
-        st.warning("Tick at least one O-1 criterion in the sidebar.")
+        st.warning("⚠️ Select at least one O-1 criterion in the sidebar.")
         st.stop()
 
     st.divider()
@@ -89,27 +141,26 @@ with tab2:
         st.session_state["approval"] = {}
 
     if "csv_metadata" not in st.session_state:
-        st.session_state["csv_metadata"] = None  # filename -> dict
+        st.session_state["csv_metadata"] = None
 
     if "overrides_by_file" not in st.session_state:
-        st.session_state["overrides_by_file"] = {}  # filename -> dict
+        st.session_state["overrides_by_file"] = {}
 
     if "meta_by_file" not in st.session_state:
-        st.session_state["meta_by_file"] = {}  # filename -> resolved dict
+        st.session_state["meta_by_file"] = {}
 
     if "regen_user_feedback" not in st.session_state:
-        st.session_state["regen_user_feedback"] = {}  # filename -> text
-
+        st.session_state["regen_user_feedback"] = {}
 
     # -------------------------
-    # Metadata: AI across all pages + per-file overrides + optional CSV for bulk
+    # Metadata
     # -------------------------
     st.subheader("🧾 Metadata (AI-detected, override if needed)")
 
     csv_data = None
-    if len(uploaded_files) > 1:
+    if len(all_files) > 1:
         with st.expander("CSV metadata overrides (bulk mode)", expanded=False):
-            filenames = [f.name for f in uploaded_files]
+            filenames = [f.name for f in all_files]
             template_bytes = make_csv_template(filenames)
 
             st.download_button(
@@ -137,11 +188,16 @@ with tab2:
 
         csv_data = st.session_state.get("csv_metadata")
 
-    # Compute & show AI metadata per file, then allow override
-    for f in uploaded_files:
-        full_text = extract_text_from_pdf_bytes(f.getvalue())
+    # Compute & show AI metadata per file
+    for f in all_files:
+        # Read PDF bytes
+        if isinstance(f, io.BytesIO):
+            pdf_bytes = f.getvalue()
+        else:
+            pdf_bytes = f.getvalue()
+        
+        full_text = extract_text_from_pdf_bytes(pdf_bytes)
 
-        # AI autodetect is the default base
         try:
             auto = autodetect_metadata(full_text)
         except Exception as e:
@@ -211,8 +267,13 @@ with tab2:
 
     if run_ai:
         with st.spinner("Reading PDFs and generating quote candidates…"):
-            for f in uploaded_files:
-                text = extract_text_from_pdf_bytes(f.getvalue())
+            for f in all_files:
+                if isinstance(f, io.BytesIO):
+                    pdf_bytes = f.getvalue()
+                else:
+                    pdf_bytes = f.getvalue()
+                    
+                text = extract_text_from_pdf_bytes(pdf_bytes)
                 data = suggest_ovisa_quotes(
                     document_text=text,
                     beneficiary_name=beneficiary_name,
@@ -234,11 +295,11 @@ with tab2:
     st.divider()
 
     # -------------------------
-    # Step 2: Approve/Reject (per PDF, per criterion)
+    # Step 2: Approve/Reject
     # -------------------------
     st.subheader("2️⃣ Approve / Reject quotes by criterion")
 
-    for f in uploaded_files:
+    for f in all_files:
         st.markdown(f"## 📄 {f.name}")
 
         data = st.session_state["ai_by_file"].get(f.name)
@@ -253,7 +314,6 @@ with tab2:
 
         by_criterion = data.get("by_criterion", {})
 
-        # NEW: user feedback box (this replaces the app "telling itself" feedback)
         uf_key = f"user_feedback_{f.name}"
         st.session_state["regen_user_feedback"].setdefault(f.name, "")
         user_feedback = st.text_area(
@@ -284,7 +344,12 @@ with tab2:
             }
 
             with st.spinner("Regenerating with your feedback…"):
-                text = extract_text_from_pdf_bytes(f.getvalue())
+                if isinstance(f, io.BytesIO):
+                    pdf_bytes = f.getvalue()
+                else:
+                    pdf_bytes = f.getvalue()
+                    
+                text = extract_text_from_pdf_bytes(pdf_bytes)
                 new_data = suggest_ovisa_quotes(
                     document_text=text,
                     beneficiary_name=beneficiary_name,
@@ -346,7 +411,7 @@ with tab2:
     st.divider()
 
     # -------------------------
-    # Step 3: Export one PDF per criterion (and ZIP)
+    # Step 3: Export
     # -------------------------
     st.subheader("3️⃣ Export highlighted PDFs by criterion")
 
@@ -372,7 +437,7 @@ with tab2:
     if zip_btn:
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for f in uploaded_files:
+            for f in all_files:
                 data = st.session_state["ai_by_file"].get(f.name)
                 if not data:
                     continue
@@ -382,8 +447,13 @@ with tab2:
                     if not approved_quotes:
                         continue
 
+                    if isinstance(f, io.BytesIO):
+                        pdf_bytes = f.getvalue()
+                    else:
+                        pdf_bytes = f.getvalue()
+
                     out_bytes, report = build_annotated_pdf_bytes(
-                        f.getvalue(),
+                        pdf_bytes,
                         approved_quotes,
                         cid,
                         filename=f.name,
@@ -403,7 +473,7 @@ with tab2:
 
     st.caption("You can also export per PDF/per criterion below:")
 
-    for f in uploaded_files:
+    for f in all_files:
         data = st.session_state["ai_by_file"].get(f.name)
         if not data:
             continue
@@ -418,8 +488,13 @@ with tab2:
 
             if st.button(f"Generate PDF for Criterion {cid}", key=f"gen_{f.name}_{cid}"):
                 with st.spinner("Annotating…"):
+                    if isinstance(f, io.BytesIO):
+                        pdf_bytes = f.getvalue()
+                    else:
+                        pdf_bytes = f.getvalue()
+                        
                     out_bytes, report = build_annotated_pdf_bytes(
-                        f.getvalue(),
+                        pdf_bytes,
                         approved_quotes,
                         cid,
                         filename=f.name,
