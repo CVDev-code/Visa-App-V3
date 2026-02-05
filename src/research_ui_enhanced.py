@@ -122,39 +122,62 @@ def render_research_tab():
                         if existing:
                             st.warning("This URL is already added!")
                         else:
-                            # Primary source check for awards
-                            verification = None
-                            if cid == "1":
-                                with st.spinner("Verifying primary source..."):
-                                    verification = check_primary_source(
-                                        url=new_url,
-                                        title=url_title,
-                                        snippet=""
-                                    )
-                                
-                                if not verification.get("is_primary_source", False):
-                                    st.warning(
-                                        f"⚠️ This may not be a primary source: {verification.get('reasoning', '')}"
-                                    )
-                                    if not st.checkbox("Add anyway?", key=f"override_{cid}_{len(st.session_state.research_urls[cid])}"):
-                                        st.stop()
-                            
-                            # Add URL
-                            url_data = {
-                                "url": new_url,
-                                "title": url_title or new_url,
-                                "verification": verification,
-                                "fetched": False
-                            }
-                            st.session_state.research_urls[cid].append(url_data)
-                            st.session_state.research_approvals[cid][new_url] = True  # Default approved
-                            st.success("✅ URL added!")
-                            st.rerun()
+                            with st.spinner("Fetching and analyzing webpage..."):
+                                try:
+                                    from src.web_to_pdf import fetch_webpage_content
+                                    
+                                    # Fetch webpage immediately
+                                    webpage_data = fetch_webpage_content(new_url)
+                                    
+                                    # Primary source check for awards
+                                    verification = None
+                                    if cid == "1":
+                                        verification = check_primary_source(
+                                            url=new_url,
+                                            title=webpage_data.get('title', url_title),
+                                            snippet=webpage_data.get('content', '')[:500]
+                                        )
+                                        
+                                        if not verification.get("is_primary_source", False):
+                                            st.warning(
+                                                f"⚠️ This may not be a primary source: {verification.get('reasoning', '')}"
+                                            )
+                                            if not st.checkbox("Add anyway?", key=f"override_{cid}_{len(st.session_state.research_urls[cid])}"):
+                                                st.stop()
+                                    
+                                    # Add URL with fetched content
+                                    url_data = {
+                                        "url": new_url,
+                                        "title": url_title or webpage_data.get('title', new_url),
+                                        "verification": verification,
+                                        "webpage_data": webpage_data,
+                                        "fetched": True
+                                    }
+                                    st.session_state.research_urls[cid].append(url_data)
+                                    st.session_state.research_approvals[cid][new_url] = True  # Default approved
+                                    st.session_state.research_previews[new_url] = webpage_data
+                                    st.success("✅ URL added and fetched!")
+                                    st.rerun()
+                                    
+                                except Exception as e:
+                                    st.error(f"Error fetching webpage: {str(e)}")
+                                    st.info("You can still add the URL manually and fetch later.")
+                                    url_data = {
+                                        "url": new_url,
+                                        "title": url_title or new_url,
+                                        "verification": None,
+                                        "fetched": False
+                                    }
+                                    st.session_state.research_urls[cid].append(url_data)
+                                    st.session_state.research_approvals[cid][new_url] = True
+                                    st.success("✅ URL added!")
+                                    st.rerun()
                 
                 # Display and manage existing URLs
                 if st.session_state.research_urls[cid]:
                     st.markdown("---")
-                    st.markdown("**📚 URLs Found:**")
+                    st.markdown("**📚 Documents Found:**")
+                    st.caption(f"{len(st.session_state.research_urls[cid])} URLs added")
                     
                     # Bulk actions
                     col1, col2 = st.columns(2)
@@ -169,85 +192,117 @@ def render_research_tab():
                                 st.session_state.research_approvals[cid][url_data['url']] = False
                             st.rerun()
                     
-                    # List URLs with preview and approval
+                    st.markdown("---")
+                    
+                    # List each URL with full preview
                     for idx, url_data in enumerate(st.session_state.research_urls[cid]):
                         url = url_data['url']
-                        
-                        # Approval checkbox
                         is_approved = st.session_state.research_approvals[cid].get(url, True)
-                        new_approval = st.checkbox(
-                            f"**{idx + 1}.** {url_data['title']}",
-                            value=is_approved,
-                            key=f"approve_{cid}_{idx}"
-                        )
-                        st.session_state.research_approvals[cid][url] = new_approval
                         
-                        col1, col2, col3 = st.columns([4, 1, 1])
+                        # Create expandable section for each URL
+                        approval_icon = "✅" if is_approved else "❌"
+                        expander_title = f"{approval_icon} {idx + 1}. {url_data['title']}"
                         
-                        with col1:
-                            st.caption(f"🔗 {url}")
+                        with st.expander(expander_title, expanded=False):
+                            # Top row: URL and actions
+                            st.markdown(f"**URL:** {url}")
+                            
+                            col1, col2, col3 = st.columns([2, 1, 1])
+                            
+                            with col1:
+                                # Approval toggle
+                                new_approval = st.checkbox(
+                                    "✓ Approve this document",
+                                    value=is_approved,
+                                    key=f"approve_checkbox_{cid}_{idx}"
+                                )
+                                if new_approval != is_approved:
+                                    st.session_state.research_approvals[cid][url] = new_approval
+                                    st.rerun()
+                            
+                            with col2:
+                                # Fetch/refresh button
+                                if not url_data.get('fetched', False):
+                                    if st.button("🔄 Fetch", key=f"fetch_{cid}_{idx}"):
+                                        with st.spinner("Fetching webpage..."):
+                                            try:
+                                                from src.web_to_pdf import fetch_webpage_content
+                                                webpage_data = fetch_webpage_content(url)
+                                                st.session_state.research_previews[url] = webpage_data
+                                                url_data['webpage_data'] = webpage_data
+                                                url_data['fetched'] = True
+                                                st.success("Fetched!")
+                                                st.rerun()
+                                            except Exception as e:
+                                                st.error(f"Error: {str(e)}")
+                            
+                            with col3:
+                                # Delete button
+                                if st.button("🗑️ Delete", key=f"delete_{cid}_{idx}"):
+                                    st.session_state.research_urls[cid].pop(idx)
+                                    if url in st.session_state.research_approvals[cid]:
+                                        del st.session_state.research_approvals[cid][url]
+                                    if url in st.session_state.research_previews:
+                                        del st.session_state.research_previews[url]
+                                    st.rerun()
+                            
+                            # Verification status (for awards)
                             if url_data.get("verification"):
                                 conf = url_data["verification"].get("confidence", "unknown")
                                 is_primary = url_data["verification"].get("is_primary_source", False)
+                                reasoning = url_data["verification"].get("reasoning", "")
+                                
                                 if is_primary:
-                                    st.success(f"✅ Primary source ({conf})")
+                                    st.success(f"✅ **Primary Source** (confidence: {conf})")
                                 else:
-                                    st.warning(f"⚠️ Not primary ({conf})")
-                        
-                        with col2:
-                            # Preview button
-                            if st.button("👁️ Preview", key=f"preview_{cid}_{idx}"):
-                                with st.spinner("Fetching webpage..."):
-                                    try:
-                                        from src.web_to_pdf import fetch_webpage_content
-                                        webpage_data = fetch_webpage_content(url)
-                                        st.session_state.research_previews[url] = webpage_data
-                                        url_data['fetched'] = True
-                                        st.success("Fetched!")
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Error: {str(e)}")
-                        
-                        with col3:
-                            # Delete button
-                            if st.button("🗑️", key=f"delete_{cid}_{idx}"):
-                                st.session_state.research_urls[cid].pop(idx)
-                                if url in st.session_state.research_approvals[cid]:
-                                    del st.session_state.research_approvals[cid][url]
-                                if url in st.session_state.research_previews:
-                                    del st.session_state.research_previews[url]
-                                st.rerun()
-                        
-                        # Show preview if fetched
-                        if url in st.session_state.research_previews:
-                            preview_data = st.session_state.research_previews[url]
-                            with st.expander(f"📄 Preview: {preview_data.get('title', 'Document')}", expanded=False):
-                                st.markdown(f"**Author:** {preview_data.get('author', 'Unknown')}")
-                                st.markdown(f"**Date:** {preview_data.get('date', 'Unknown')}")
-                                st.markdown("---")
-                                content = preview_data.get('content', '')
-                                # Show first 2000 chars with option to see more
-                                if len(content) > 2000:
-                                    st.text_area(
-                                        "Content Preview",
-                                        value=content[:2000] + "\n\n[...content continues...]",
-                                        height=300,
-                                        disabled=True,
-                                        key=f"preview_content_{cid}_{idx}"
-                                    )
+                                    st.warning(f"⚠️ **Not Primary Source** (confidence: {conf})")
+                                st.caption(f"Reasoning: {reasoning}")
+                            
+                            st.markdown("---")
+                            
+                            # FULL DOCUMENT PREVIEW
+                            if url_data.get('fetched', False) or url in st.session_state.research_previews:
+                                webpage_data = url_data.get('webpage_data') or st.session_state.research_previews.get(url)
+                                
+                                if webpage_data:
+                                    st.markdown("### 📄 Full Document Preview")
+                                    
+                                    # Metadata
+                                    metadata_cols = st.columns(3)
+                                    with metadata_cols[0]:
+                                        st.caption(f"**Author:** {webpage_data.get('author', 'Unknown')}")
+                                    with metadata_cols[1]:
+                                        st.caption(f"**Date:** {webpage_data.get('date', 'Unknown')}")
+                                    with metadata_cols[2]:
+                                        word_count = len(webpage_data.get('content', '').split())
+                                        st.caption(f"**Words:** ~{word_count}")
+                                    
+                                    st.markdown("---")
+                                    
+                                    # Full content in scrollable area
+                                    content = webpage_data.get('content', '')
+                                    if content:
+                                        st.markdown("**Full Article Text:**")
+                                        st.text_area(
+                                            "Scroll to read entire document",
+                                            value=content,
+                                            height=400,
+                                            disabled=True,
+                                            key=f"full_preview_{cid}_{idx}",
+                                            label_visibility="collapsed"
+                                        )
+                                    else:
+                                        st.warning("No content could be extracted from this URL.")
                                 else:
-                                    st.text_area(
-                                        "Content Preview",
-                                        value=content,
-                                        height=300,
-                                        disabled=True,
-                                        key=f"preview_content_{cid}_{idx}"
-                                    )
-                        
-                        st.markdown("---")
+                                    st.info("Content not yet fetched. Click 'Fetch' button above.")
+                            else:
+                                st.info("👆 Click 'Fetch' to preview this document")
                     
-                    # Regenerate section
+                    # Regenerate section (OUTSIDE per-URL loop, applies to all URLs in criterion)
+                    st.markdown("---")
                     st.markdown("**🔄 Regenerate Search (Optional)**")
+                    st.caption("Use feedback to find better URLs. Approved URLs will be kept.")
+                    
                     feedback_key = f"feedback_{cid}"
                     feedback_text = st.text_area(
                         "Instructions for finding better URLs",
@@ -275,47 +330,121 @@ def render_research_tab():
                             (Implementation: Call generate_search_queries with feedback parameter)
                             """)
     
-    # Organization Verification Tool
+    # Auto Organization Verification for Criteria 4 (Distinguished Organizations)
     st.markdown("---")
-    st.subheader("🏛️ Organization Verification Tool")
-    st.markdown("Verify if a venue/organization is 'distinguished' and save evidence.")
+    st.subheader("🏛️ Organization Verification (Criteria 4)")
     
-    col1, col2 = st.columns([3, 1])
+    # Check if Criterion 4 is selected
+    has_criterion_4 = any(cid in ["4_past", "4_future"] for cid in selected_criteria)
     
-    with col1:
-        org_name = st.text_input(
-            "Organization Name",
-            placeholder="e.g., Bavarian State Opera",
-            key="org_verify_input"
-        )
-    
-    with col2:
-        st.write("")
-        st.write("")
-        verify_button = st.button("✓ Verify", key="verify_org_button")
-    
-    if verify_button and org_name:
-        with st.spinner(f"Verifying {org_name}..."):
-            result = verify_organization_distinguished(
-                organization_name=org_name,
-                context=""
-            )
+    if not has_criterion_4:
+        st.info("Select Criterion 4 (past or future) in the sidebar to use organization verification.")
+    else:
+        st.markdown("""
+        For Criteria 4, the app will automatically:
+        1. Detect organization names from your documents
+        2. Verify if they're "distinguished"
+        3. Generate evidence PDFs you can approve/reject
+        """)
+        
+        # Initialize organization verification state
+        if "org_verifications" not in st.session_state:
+            st.session_state.org_verifications = {}
+        
+        # Scan all approved documents for Criteria 4 to find organizations
+        st.markdown("### Detected Organizations")
+        
+        if st.session_state.org_verifications:
+            st.caption(f"{len(st.session_state.org_verifications)} organizations verified")
             
-            is_distinguished = result.get("is_distinguished", False)
-            confidence = result.get("confidence", "unknown")
-            reasoning = result.get("reasoning", "")
+            for org_name, verification_data in st.session_state.org_verifications.items():
+                is_approved = verification_data.get('approved', True)
+                approval_icon = "✅" if is_approved else "❌"
+                
+                with st.expander(f"{approval_icon} {org_name}", expanded=False):
+                    result = verification_data.get('result', {})
+                    evidence = verification_data.get('evidence', [])
+                    
+                    # Approval checkbox
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        new_approval = st.checkbox(
+                            "✓ Approve this verification",
+                            value=is_approved,
+                            key=f"org_approve_{org_name}"
+                        )
+                        if new_approval != is_approved:
+                            verification_data['approved'] = new_approval
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("🗑️ Remove", key=f"org_delete_{org_name}"):
+                            del st.session_state.org_verifications[org_name]
+                            st.rerun()
+                    
+                    # Verification result
+                    is_distinguished = result.get("is_distinguished", False)
+                    confidence = result.get("confidence", "unknown")
+                    reasoning = result.get("reasoning", "")
+                    
+                    if is_distinguished:
+                        st.success(f"✅ **Distinguished Organization** (Confidence: {confidence})")
+                    else:
+                        st.error(f"❌ **Not Distinguished** (Confidence: {confidence})")
+                    
+                    st.info(f"**Reasoning:** {reasoning}")
+                    
+                    # Evidence sources
+                    if evidence:
+                        st.markdown("---")
+                        st.markdown("**📚 Evidence Sources:**")
+                        for i, source in enumerate(evidence, 1):
+                            st.markdown(f"{i}. [{source.get('title', 'Source')}]({source.get('url', '#')})")
+                            if source.get('snippet'):
+                                st.caption(source.get('snippet', ''))
+        else:
+            st.info("No organizations detected yet.")
+        
+        # Manual verification option
+        with st.expander("➕ Manually Verify an Organization", expanded=False):
+            st.caption("Manually add an organization if not auto-detected from documents")
             
-            if is_distinguished:
-                st.success(f"✅ **Distinguished Organization** (Confidence: {confidence})")
-            else:
-                st.error(f"❌ **Not Distinguished** (Confidence: {confidence})")
+            col1, col2 = st.columns([3, 1])
             
-            st.info(f"**Reasoning:** {reasoning}")
+            with col1:
+                org_name_input = st.text_input(
+                    "Organization Name",
+                    placeholder="e.g., Bavarian State Opera",
+                    key="manual_org_input"
+                )
             
-            # Option to save evidence
-            if is_distinguished:
-                if st.button("💾 Save as Evidence PDF", key="save_org_evidence"):
-                    st.info("Feature coming: This will create a PDF document with the verification and source evidence.")
+            with col2:
+                st.write("")
+                st.write("")
+                verify_manual_btn = st.button("✓ Verify", key="verify_manual_org")
+            
+            if verify_manual_btn and org_name_input:
+                with st.spinner(f"Verifying {org_name_input}..."):
+                    try:
+                        from src.web_to_pdf import fetch_organization_evidence
+                        
+                        # Verify organization
+                        result, evidence_urls = fetch_organization_evidence(org_name_input)
+                        
+                        # Store verification
+                        st.session_state.org_verifications[org_name_input] = {
+                            'result': result,
+                            'evidence': evidence_urls,
+                            'approved': result.get('is_distinguished', False),  # Auto-approve if distinguished
+                            'manual': True
+                        }
+                        
+                        st.success(f"✅ Verified {org_name_input}")
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"Error verifying organization: {str(e)}")
+
     
     # Convert Approved URLs to PDFs
     st.markdown("---")
