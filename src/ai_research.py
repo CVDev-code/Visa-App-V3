@@ -79,7 +79,6 @@ def _search_with_tavily(query: str, max_results: int = 5) -> List[Dict]:
                 "content": item.get("raw_content", item.get("content", "")),
                 "score": item.get("score", 0.0)
             })
-            })
         
         return results
         
