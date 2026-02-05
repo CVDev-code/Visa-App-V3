@@ -2,7 +2,8 @@ import streamlit as st
 from typing import Dict, List
 import json
 
-from src.ai_research import ai_search_for_evidence
+# Remove this line - we'll import dynamically
+# from src.ai_research import ai_search_for_evidence
 from src.prompts import CRITERIA
 
 
@@ -63,6 +64,9 @@ def render_research_tab():
     if search_btn:
         with st.spinner("🤖 AI is searching the web for evidence... This may take 30-60 seconds."):
             try:
+                # Import here to avoid module errors
+                from src.ai_research import ai_search_for_evidence
+                
                 results = ai_search_for_evidence(
                     artist_name=beneficiary_name,
                     name_variants=beneficiary_variants,
@@ -213,6 +217,9 @@ def render_research_tab():
             if st.button("🔄 Regenerate", key=f"regen_{cid}"):
                 with st.spinner(f"AI is searching for better sources for Criterion {cid}..."):
                     try:
+                        # Import here
+                        from src.ai_research import ai_search_for_evidence
+                        
                         # Prepare feedback
                         feedback = {
                             "approved_urls": approved,
