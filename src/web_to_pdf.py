@@ -32,11 +32,10 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
     # - newspaper3k or readability-lxml to extract clean article content
     # - BeautifulSoup as fallback
     
+    # Try newspaper3k first (best for news/article sites)
     try:
-        import requests
         from newspaper import Article
         
-        # Try newspaper3k first (best for news articles)
         article = Article(url)
         article.download()
         article.parse()
@@ -50,7 +49,8 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
             "raw_html": article.html
         }
     except Exception as e:
-        # Fallback to BeautifulSoup
+        print(f"[newspaper3k failed] {e}, trying BeautifulSoup...")
+        # Fallback to BeautifulSoup with aggressive cleaning
         try:
             from bs4 import BeautifulSoup
             import requests
@@ -64,19 +64,45 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
             title_tag = soup.find('title') or soup.find('h1')
             title = title_tag.get_text().strip() if title_tag else "Untitled"
             
-            # Remove scripts, styles, nav, footer, ads
-            for tag in soup(['script', 'style', 'nav', 'footer', 'aside', 'iframe']):
+            # Remove scripts, styles, navigation, ads, etc.
+            for tag in soup(['script', 'style', 'nav', 'footer', 'aside', 'iframe', 'header']):
                 tag.decompose()
+            
+            # Remove common junk classes/IDs
+            junk_selectors = [
+                {'class': ['nav', 'navigation', 'navbar', 'menu', 'sidebar', 'widget']},
+                {'class': ['breadcrumb', 'breadcrumbs', 'tags', 'categories']},
+                {'class': ['share', 'social', 'comments', 'related']},
+                {'class': ['ad', 'ads', 'advertisement', 'promo']},
+                {'class': ['meta', 'metadata', 'byline']},  # We'll extract author separately
+                {'id': ['nav', 'navigation', 'sidebar', 'footer', 'header']},
+            ]
+            
+            for selector in junk_selectors:
+                for tag in soup.find_all(**selector):
+                    tag.decompose()
             
             # Get main content
             main_content = (
                 soup.find('article') or 
                 soup.find('main') or 
-                soup.find('div', class_=['content', 'article', 'post']) or
+                soup.find('div', class_=['content', 'article', 'post', 'entry-content']) or
                 soup.find('body')
             )
             
-            content = main_content.get_text(separator='\n\n').strip() if main_content else ""
+            if main_content:
+                # Extract just paragraphs for cleaner content
+                paragraphs = main_content.find_all('p')
+                if paragraphs:
+                    content = '\n\n'.join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
+                else:
+                    content = main_content.get_text(separator='\n\n').strip()
+            else:
+                content = ""
+            
+            # Clean up: remove multiple blank lines
+            import re
+            content = re.sub(r'\n{3,}', '\n\n', content)
             
             return {
                 "title": title,
@@ -92,14 +118,14 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
 
 def convert_webpage_to_pdf_with_margins(
     webpage_data: Dict[str, str],
-    left_margin_mm: float = 20,
-    right_margin_mm: float = 20,
-    top_margin_mm: float = 20,
-    bottom_margin_mm: float = 20
+    left_margin_mm: float = 30,
+    right_margin_mm: float = 30,
+    top_margin_mm: float = 30,
+    bottom_margin_mm: float = 30
 ) -> bytes:
     """
     Convert webpage content to PDF matching Opera Today print style.
-    Uses 20mm margins (compromise between tight print and annotation space).
+    Uses 30mm margins for annotation space.
     
     Args:
         webpage_data: Dictionary from fetch_webpage_content()
@@ -161,10 +187,10 @@ def convert_webpage_to_pdf_with_margins(
             }}
             
             body {{
-                font-family: Arial, Helvetica, sans-serif;
-                font-size: 12pt;
-                line-height: 1.2;
-                color: #111;
+                font-family: Georgia, 'Times New Roman', Times, serif;
+                font-size: 11pt;
+                line-height: 1.4;
+                color: #000;
                 text-align: left;
                 hyphens: none;
                 margin: 0;
@@ -172,9 +198,9 @@ def convert_webpage_to_pdf_with_margins(
             }}
             
             h1 {{
-                font-size: 18pt;
+                font-size: 22pt;
                 font-weight: bold;
-                margin: 0 0 6pt 0;
+                margin: 0 0 10pt 0;
                 padding: 0;
                 color: #000;
                 line-height: 1.2;
@@ -182,14 +208,19 @@ def convert_webpage_to_pdf_with_margins(
             
             .url-display {{
                 font-size: 9pt;
-                color: #000;
-                margin: 0 0 10pt 0;
+                color: #666;
+                margin: 0 0 15pt 0;
                 text-decoration: none;
                 word-wrap: break-word;
             }}
             
+            .url-display::before {{
+                content: "🔗 ";
+                color: #999;
+            }}
+            
             p {{
-                margin: 0 0 12pt 0;
+                margin: 0 0 10pt 0;
                 padding: 0;
             }}
             
@@ -353,13 +384,13 @@ def batch_convert_urls_to_pdfs(
                 if progress_callback:
                     progress_callback(processed, total_urls, f"Converting: {title}")
                 
-                # Convert to PDF with 20mm margins (Opera Today style)
+                # Convert to PDF with 30mm margins
                 pdf_bytes = convert_webpage_to_pdf_with_margins(
                     webpage_data,
-                    left_margin_mm=20,
-                    right_margin_mm=20,
-                    top_margin_mm=20,
-                    bottom_margin_mm=20
+                    left_margin_mm=30,
+                    right_margin_mm=30,
+                    top_margin_mm=30,
+                    bottom_margin_mm=30
                 )
                 
                 # Create safe filename
