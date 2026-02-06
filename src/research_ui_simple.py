@@ -162,14 +162,8 @@ def render_research_tab():
                     if excerpt:
                         st.caption(f"**Excerpt:** \"{excerpt}\"")
                     
-                    # URL and optional full preview
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.caption(f"🔗 {url}")
-                    with col2:
-                        # Optional: Preview full article if needed
-                        if st.button("👁️", key=f"view_{cid}_{i}", help="View full article"):
-                            st.info("Opening in new tab - click the URL above")
+                    # URL only - clicking opens in new tab
+                    st.caption(f"🔗 {url}")
                 
                 st.markdown("---")
             
