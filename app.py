@@ -192,7 +192,7 @@ with tab2:
         csv_data = st.session_state.get("csv_metadata")
 
     # Compute & show AI metadata per file
-    for f in all_files:
+    for file_idx, f in enumerate(all_files):
         # Read PDF bytes
         if isinstance(f, io.BytesIO):
             pdf_bytes = f.getvalue()
@@ -224,25 +224,25 @@ with tab2:
             o["source_url"] = st.text_input(
                 "Source URL override",
                 value=o.get("source_url", "") or (resolved.get("source_url") or ""),
-                key=f"url_{f.name}",
+                key=f"url_{file_idx}_{f.name}",
             ).strip()
 
             o["venue_name"] = st.text_input(
                 "Venue / organisation override",
                 value=o.get("venue_name", "") or (resolved.get("venue_name") or ""),
-                key=f"venue_{f.name}",
+                key=f"venue_{file_idx}_{f.name}",
             ).strip()
 
             o["ensemble_name"] = st.text_input(
                 "Ensemble / orchestra / choir override",
                 value=o.get("ensemble_name", "") or (resolved.get("ensemble_name") or ""),
-                key=f"ensemble_{f.name}",
+                key=f"ensemble_{file_idx}_{f.name}",
             ).strip()
 
             o["performance_date"] = st.text_input(
                 "Performance date override",
                 value=o.get("performance_date", "") or (resolved.get("performance_date") or ""),
-                key=f"date_{f.name}",
+                key=f"date_{file_idx}_{f.name}",
             ).strip()
 
             st.session_state["overrides_by_file"][f.name] = {k: v for k, v in o.items() if v}
@@ -302,7 +302,7 @@ with tab2:
     # -------------------------
     st.subheader("2️⃣ Approve / Reject quotes by criterion")
 
-    for f in all_files:
+    for file_idx, f in enumerate(all_files):
         st.markdown(f"## 📄 {f.name}")
 
         data = st.session_state["ai_by_file"].get(f.name)
@@ -317,7 +317,7 @@ with tab2:
 
         by_criterion = data.get("by_criterion", {})
 
-        uf_key = f"user_feedback_{f.name}"
+        uf_key = f"user_feedback_{file_idx}_{f.name}"
         st.session_state["regen_user_feedback"].setdefault(f.name, "")
         user_feedback = st.text_area(
             "Optional instruction for regeneration (e.g. 'focus only on critical acclaim and named roles; avoid generic praise').",
@@ -329,7 +329,7 @@ with tab2:
 
         regen_col1, regen_col2 = st.columns([1, 3])
         with regen_col1:
-            regen_btn = st.button("Regenerate with my feedback", key=f"regen_{f.name}")
+            regen_btn = st.button("Regenerate with my feedback", key=f"regen_{file_idx}_{f.name}")
         with regen_col2:
             st.caption("Tip: Approve/reject quotes below, add an instruction above, then regenerate.")
 
@@ -387,10 +387,10 @@ with tab2:
 
                 b1, b2, b3 = st.columns([1, 1, 2])
                 with b1:
-                    if st.button("Approve all", key=f"approve_all_{f.name}_{cid}"):
+                    if st.button("Approve all", key=f"approve_all_{file_idx}_{f.name}_{cid}"):
                         st.session_state["approval"][f.name][cid] = {it["quote"]: True for it in items}
                 with b2:
-                    if st.button("Reject all", key=f"reject_all_{f.name}_{cid}"):
+                    if st.button("Reject all", key=f"reject_all_{file_idx}_{f.name}_{cid}"):
                         st.session_state["approval"][f.name][cid] = {it["quote"]: False for it in items}
 
                 approvals = st.session_state["approval"].get(f.name, {}).get(cid, {})
@@ -402,7 +402,7 @@ with tab2:
                     approvals[q] = st.checkbox(
                         label,
                         value=approvals.get(q, True),
-                        key=f"chk_{f.name}_{cid}_{i}",
+                        key=f"chk_{file_idx}_{f.name}_{cid}_{i}",
                     )
 
                 st.session_state["approval"][f.name][cid] = approvals
@@ -489,7 +489,7 @@ with tab2:
             if not approved_quotes:
                 continue
 
-            if st.button(f"Generate PDF for Criterion {cid}", key=f"gen_{f.name}_{cid}"):
+            if st.button(f"Generate PDF for Criterion {cid}", key=f"gen_{file_idx}_{f.name}_{cid}"):
                 with st.spinner("Annotating…"):
                     if isinstance(f, io.BytesIO):
                         pdf_bytes = f.getvalue()
@@ -514,7 +514,7 @@ with tab2:
                     data=out_bytes,
                     file_name=out_name,
                     mime="application/pdf",
-                    key=f"dl_{f.name}_{cid}",
+                    key=f"dl_{file_idx}_{f.name}_{cid}",
                 )
 
     st.divider()
