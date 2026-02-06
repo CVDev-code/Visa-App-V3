@@ -224,6 +224,12 @@ def _extract_publication_logo(soup, url: str) -> Optional[str]:
     """
     Extract publication logo/masthead for PDF header branding.
     
+    Tries multiple methods:
+    1. Known publications (hardcoded URLs)
+    2. <img> tags with logo classes (works for most sites)
+    3. SVG logos (Guardian, NY Times, etc.)
+    4. Images in header containers
+    
     Args:
         soup: BeautifulSoup object
         url: Original URL (for converting relative paths)
@@ -231,18 +237,40 @@ def _extract_publication_logo(soup, url: str) -> Optional[str]:
     Returns:
         URL to logo image, or None if not found
     """
-    from urllib.parse import urljoin
+    from urllib.parse import urljoin, urlparse
+    
+    # PRIORITY 1: Check hardcoded known logos (most reliable)
+    # These are major publications that use SVG or have detection issues
+    domain = urlparse(url).netloc.replace('www.', '').lower()
+    
+    KNOWN_LOGOS = {
+        # Major news publications
+        'theguardian.com': 'https://assets.guim.co.uk/images/logos/the-guardian/roundel.png',
+        'nytimes.com': 'https://www.nytimes.com/vi-assets/static-assets/logo-420x60.png',
+        'latimes.com': 'https://www.latimes.com/california/story/2024-08-27/la-times-masthead.png',
+        'washingtonpost.com': 'https://www.washingtonpost.com/sf/brand-connect/dell-technologies/the-economics-of-change/img/wapo-logo.png',
+        
+        # Classical music publications
+        'operawire.com': 'https://operawire.com/wp-content/uploads/2017/12/Operawire-Logo-1.png',
+        'bachtrack.com': 'https://www.bachtrack.com/images/bachtrack-logo.png',
+        'seenandheard-international.com': 'https://www.seenandheard-international.com/wp-content/uploads/2016/01/logo.png',
+        
+        # Add more as needed - format: 'domain.com': 'https://full-logo-url.png'
+    }
+    
+    if domain in KNOWN_LOGOS:
+        return KNOWN_LOGOS[domain]
     
     publication_logo = None
     
-    # Method 1: Find images with 'logo' or 'masthead' in class
+    # PRIORITY 2: Find <img> tags with logo classes (works for National Opera, Ballet, etc.)
     logo_candidates = soup.find_all('img', class_=lambda x: x and (
         'logo' in str(x).lower() or 
         'masthead' in str(x).lower() or
         'brand' in str(x).lower()
     ))
     
-    # Method 2: Check header/masthead containers
+    # PRIORITY 3: Check header/masthead containers for images
     if not logo_candidates:
         header = soup.find(['header', 'div'], class_=lambda x: x and (
             'header' in str(x).lower() or 
@@ -252,7 +280,7 @@ def _extract_publication_logo(soup, url: str) -> Optional[str]:
         if header:
             logo_candidates = header.find_all('img', limit=5)
     
-    # Select best logo (must be reasonably sized)
+    # Select best logo from candidates (must be reasonably sized)
     for logo_img in logo_candidates:
         logo_src = logo_img.get('src') or logo_img.get('data-src')
         if not logo_src:
@@ -275,6 +303,19 @@ def _extract_publication_logo(soup, url: str) -> Optional[str]:
             if any(x in logo_url.lower() for x in ['logo', 'masthead', 'brand']):
                 publication_logo = logo_url
                 break
+    
+    # PRIORITY 4: Try to find SVG logos (Guardian, NY Times, Washington Post, etc.)
+    # Note: We detect SVG but can't use it directly in PDF
+    # This is just for future enhancement - could convert SVG to PNG
+    if not publication_logo:
+        svg_logos = soup.find_all('svg', class_=lambda x: x and (
+            'logo' in str(x).lower() or
+            'masthead' in str(x).lower() or
+            'brand' in str(x).lower()
+        ))
+        # For now, if we find SVG but can't use it, return None
+        # This will trigger text fallback
+        # Future: Could convert SVG to PNG or screenshot it
     
     return publication_logo
 
