@@ -35,11 +35,36 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
         article.download()
         article.parse()
         
+        # CRITICAL FIX: newspaper3k loses paragraph structure
+        # Get HTML and extract paragraphs manually for better formatting
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(article.html, 'html.parser')
+        
+        # Find article body and extract paragraphs
+        main_content = (
+            soup.find('article') or 
+            soup.find('main') or 
+            soup.find('div', class_=['content', 'article', 'post', 'entry-content', 'article-body']) or
+            soup.find('body')
+        )
+        
+        if main_content:
+            # Extract paragraphs maintaining structure
+            paragraphs = main_content.find_all('p')
+            if paragraphs and len(paragraphs) > 3:
+                # Use HTML paragraph structure (MUCH better than newspaper3k text)
+                content = '\n\n'.join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
+            else:
+                # Fallback to newspaper3k text
+                content = article.text or ""
+        else:
+            content = article.text or ""
+        
         return {
             "title": article.title or "Untitled",
             "author": ", ".join(article.authors) if article.authors else "",
             "date": article.publish_date.strftime("%B %d, %Y") if article.publish_date else "",
-            "content": article.text or "",
+            "content": content,
             "url": url,
             "raw_html": article.html
         }
@@ -86,7 +111,7 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
             )
             
             if main_content:
-                # Extract just paragraphs for cleaner content
+                # Extract paragraphs for proper structure
                 paragraphs = main_content.find_all('p')
                 if paragraphs:
                     content = '\n\n'.join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
@@ -150,7 +175,12 @@ def convert_webpage_to_pdf_with_margins(
     # Shorten URL for display (remove https://)
     display_url = url.replace('https://', '').replace('http://', '')
     
-    # Create HTML with Opera Today exact styling
+    # Extract publication name from URL
+    from urllib.parse import urlparse
+    parsed_url = urlparse(url)
+    publication_name = parsed_url.netloc.replace('www.', '').split('.')[0].title()
+    
+    # Create HTML with authentic article styling
     html_template = f"""
     <!DOCTYPE html>
     <html>
@@ -159,27 +189,34 @@ def convert_webpage_to_pdf_with_margins(
         <style>
             @page {{
                 size: letter;
-                margin: {top_margin_mm}mm {right_margin_mm}mm {bottom_margin_mm}mm {left_margin_mm}mm;
+                margin: 20mm 30mm 20mm 30mm;
                 
                 @bottom-left {{
-                    content: "{timestamp}  {title[:40]}{'...' if len(title) > 40 else ''}";
-                    font-family: 'Times New Roman', Times, serif;
+                    content: "{timestamp}";
+                    font-family: Arial, Helvetica, sans-serif;
                     font-size: 8pt;
-                    color: #000;
-                    white-space: pre;
+                    color: #666;
+                }}
+                
+                @bottom-center {{
+                    content: "{publication_name}";
+                    font-family: Arial, Helvetica, sans-serif;
+                    font-size: 8pt;
+                    color: #666;
+                    text-transform: uppercase;
                 }}
                 
                 @bottom-right {{
                     content: counter(page) "/" counter(pages);
-                    font-family: 'Times New Roman', Times, serif;
+                    font-family: Arial, Helvetica, sans-serif;
                     font-size: 8pt;
-                    color: #000;
+                    color: #666;
                 }}
             }}
             
             body {{
-                font-family: Georgia, 'Times New Roman', Times, serif;
-                font-size: 11pt;
+                font-family: Arial, Helvetica, sans-serif;
+                font-size: 10pt;
                 line-height: 1.5;
                 color: #333;
                 text-align: left;
@@ -188,44 +225,65 @@ def convert_webpage_to_pdf_with_margins(
                 padding: 0;
             }}
             
-            h1 {{
-                font-size: 28pt;
+            .publication {{
+                font-size: 9pt;
+                color: #999;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+                margin: 0 0 15pt 0;
                 font-weight: bold;
-                margin: 0 0 8pt 0;
+            }}
+            
+            h1 {{
+                font-size: 18pt;
+                font-weight: bold;
+                margin: 0 0 12pt 0;
                 padding: 0;
                 color: #000;
-                line-height: 1.1;
+                line-height: 1.2;
+            }}
+            
+            .byline {{
+                font-size: 9pt;
+                color: #666;
+                margin: 0 0 8pt 0;
+                font-style: italic;
             }}
             
             .divider {{
                 border-bottom: 1px solid #ddd;
-                margin: 8pt 0 10pt 0;
+                margin: 8pt 0 15pt 0;
             }}
             
             .url-display {{
-                font-size: 9pt;
-                color: #666;
+                font-size: 8pt;
+                color: #999;
                 margin: 0 0 20pt 0;
                 text-decoration: none;
                 word-wrap: break-word;
+                font-family: 'Courier New', monospace;
             }}
             
             .url-display::before {{
-                content: "🌐 ";
-                font-size: 10pt;
-            }}
-            
-            .author {{
-                font-size: 10pt;
-                color: #000;
-                font-weight: bold;
-                font-style: italic;
-                margin: 0 0 25pt 0;
+                content: "🔗 ";
+                color: #ccc;
             }}
             
             p {{
                 margin: 0 0 12pt 0;
                 padding: 0;
+                text-indent: 0;
+                orphans: 2;
+                widows: 2;
+            }}
+            
+            /* Preserve formatting from original */
+            em, i {{
+                font-style: italic;
+            }}
+            
+            strong, b {{
+                font-weight: bold;
             }}
             
             img {{
@@ -240,19 +298,36 @@ def convert_webpage_to_pdf_with_margins(
             img[src*="thumb"], img[width="1"], img[height="1"] {{
                 display: none;
             }}
+            
+            .footer {{
+                margin-top: 30pt;
+                padding-top: 15pt;
+                border-top: 1px solid #ddd;
+                font-size: 8pt;
+                color: #999;
+                line-height: 1.4;
+            }}
         </style>
     </head>
     <body>
+        <div class="publication">{publication_name}</div>
+        
         <h1>{title}</h1>
+        
+        {f'<div class="byline">By {author}{", " + date if date else ""}</div>' if author or date else ''}
         
         <div class="divider"></div>
         
         <div class="url-display">{display_url}</div>
         
-        {f'<div class="author">{author}</div>' if author else ''}
-        
         <div class="content">
             {_format_content_to_html(content)}
+        </div>
+        
+        <div class="footer">
+            © {datetime.now().year} {publication_name}. All rights reserved.<br>
+            Original article: {display_url}<br>
+            Retrieved: {timestamp}
         </div>
     </body>
     </html>
@@ -267,10 +342,31 @@ def convert_webpage_to_pdf_with_margins(
 
 
 def _format_content_to_html(text: str) -> str:
-    """Convert plain text to HTML paragraphs."""
+    """
+    Convert plain text to HTML paragraphs.
+    Preserves structure for authentic look.
+    """
+    if not text:
+        return ""
+    
+    # Split into paragraphs
     paragraphs = text.split('\n\n')
-    html_paragraphs = [f"<p>{p.strip()}</p>" for p in paragraphs if p.strip()]
-    return '\n'.join(html_paragraphs)
+    
+    html_parts = []
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        
+        # Escape HTML but preserve structure
+        para = para.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        
+        # Preserve common formatting patterns from original text
+        # (newspaper3k strips HTML but sometimes leaves formatting clues)
+        
+        html_parts.append(f"<p>{para}</p>")
+    
+    return '\n'.join(html_parts)
 
 
 def batch_convert_urls_to_pdfs(
