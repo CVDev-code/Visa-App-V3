@@ -45,7 +45,7 @@ with st.sidebar:
     st.subheader("O-1 Criteria")
     st.caption("Select criteria for research AND highlighting")
     
-    default_criteria = ["2_past", "2_future", "3", "4_past", "4_future"]
+    default_criteria = []  # Nothing selected by default
     selected_criteria_ids: list[str] = []
     
     for cid, desc in CRITERIA.items():
