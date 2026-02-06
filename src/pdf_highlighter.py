@@ -559,6 +559,8 @@ def _place_annotation_in_margin(
     targets: List[fitz.Rect],
     occupied_callouts: List[fitz.Rect],
     label: str,
+    left_count: int = 0,
+    right_count: int = 0,
 ) -> Tuple[fitz.Rect, str, int, bool]:
     text_area = _detect_actual_text_area(page)
     pr = page.rect
@@ -594,12 +596,26 @@ def _place_annotation_in_margin(
         )
         return _ensure_min_size(fallback, pr), label, 8, False
 
-    page_mid_x = pr.width / 2.0
-    target_side_pref = "left" if target_c.x < page_mid_x else "right"
-    lanes.sort(key=lambda t: 0 if t[0] == target_side_pref else 1)
+    # Balance left/right annotations based on counts
+    if left_count < right_count:
+        # Prefer left (fewer annotations)
+        lanes.sort(key=lambda t: 0 if t[0] == "left" else 1)
+    elif right_count < left_count:
+        # Prefer right (fewer annotations)
+        lanes.sort(key=lambda t: 0 if t[0] == "right" else 1)
+    else:
+        # Equal counts - prefer side closer to target
+        page_mid_x = pr.width / 2.0
+        target_side_pref = "left" if target_c.x < page_mid_x else "right"
+        lanes.sort(key=lambda t: 0 if t[0] == target_side_pref else 1)
 
     occupied_buf = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied_callouts]
-    scan = [12, -12, 24, -24, 36, -36, 48, -48, 60, -60, 72, -72, 0]
+    
+    # Limit drift from target to stay close to red box
+    scan = [0]
+    for offset in range(5, int(MAX_ANNOTATION_DRIFT) + 1, 5):
+        scan.append(offset)
+        scan.append(-offset)
 
     best = None  # (score, rect, wrapped, fs, safe)
 
