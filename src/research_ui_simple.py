@@ -49,9 +49,9 @@ def render_research_tab():
     
     colA, colB = st.columns([1, 1])
     with colA:
-        search_btn = st.button("🔎 Search for Evidence", type="primary")
+        search_btn = st.button("🔎 Search for Evidence", type="primary", key="research_search_btn")
     with colB:
-        clear_btn = st.button("Clear results")
+        clear_btn = st.button("Clear results", key="research_clear_btn")
     
     if clear_btn:
         st.session_state.research_results = {}
@@ -240,7 +240,7 @@ def render_research_tab():
     else:
         st.markdown(f"**{total_approved} approved sources** ready.")
         
-        if st.button("📄 Convert All to PDFs", type="primary"):
+        if st.button("📄 Convert All to PDFs", type="primary", key="research_convert_all_btn"):
             with st.spinner(f"Converting {total_approved} sources..."):
                 try:
                     from src.web_to_pdf import batch_convert_urls_to_pdfs
