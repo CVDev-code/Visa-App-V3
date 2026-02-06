@@ -8,10 +8,8 @@ requests>=2.31.0
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
 reportlab>=4.0.0
+newspaper3k>=0.2.8
+weasyprint>=60.0
 
 # Tavily for high-quality web search
 tavily-python>=0.3.0
-
-# Optional: Better article extraction (uncomment if needed)
-# newspaper3k>=0.2.8
-# readability-lxml>=0.8.1
