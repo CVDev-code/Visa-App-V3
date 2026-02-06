@@ -22,7 +22,7 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
             "title": "Article Title",
             "author": "Author Name",
             "date": "Publication Date",
-            "content": "Full article text",
+            "content": "Full article text with <img> tags for images",
             "url": "Original URL",
             "raw_html": "Full HTML (for debugging)"
         }
@@ -30,17 +30,17 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
     # Try newspaper3k first (best for news/article sites)
     try:
         from newspaper import Article
+        from bs4 import BeautifulSoup
+        from urllib.parse import urljoin
         
         article = Article(url)
         article.download()
         article.parse()
         
-        # CRITICAL FIX: newspaper3k loses paragraph structure
-        # Get HTML and extract paragraphs manually for better formatting
-        from bs4 import BeautifulSoup
+        # Get HTML and extract paragraphs + images manually for better formatting
         soup = BeautifulSoup(article.html, 'html.parser')
         
-        # Find article body and extract paragraphs
+        # Find article body
         main_content = (
             soup.find('article') or 
             soup.find('main') or 
@@ -49,14 +49,62 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
         )
         
         if main_content:
+            # Extract images from article (filter out junk)
+            images = []
+            for img in main_content.find_all('img'):
+                img_src = img.get('src', '')
+                if not img_src:
+                    continue
+                
+                # Convert relative URLs to absolute
+                img_src = urljoin(url, img_src)
+                
+                # Filter out junk images
+                if any(x in img_src.lower() for x in ['logo', 'icon', 'avatar', 'ad', 'banner', 'button', 'pixel', 'tracking']):
+                    continue
+                
+                # Skip tiny images (likely icons/tracking pixels)
+                width = img.get('width', '')
+                height = img.get('height', '')
+                try:
+                    if width and int(width) < 50:
+                        continue
+                    if height and int(height) < 50:
+                        continue
+                except:
+                    pass
+                
+                # Keep this image
+                images.append(img_src)
+            
             # Extract paragraphs maintaining structure
             paragraphs = main_content.find_all('p')
             if paragraphs and len(paragraphs) > 3:
-                # Use HTML paragraph structure (MUCH better than newspaper3k text)
-                content = '\n\n'.join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
+                # Build content with images interspersed
+                content_parts = []
+                
+                # Add first image at top if available
+                if images:
+                    content_parts.append(f'<img src="{images[0]}" alt="Article image">')
+                
+                # Add paragraphs
+                for p in paragraphs:
+                    p_text = p.get_text().strip()
+                    if p_text:
+                        content_parts.append(p_text)
+                
+                # Add second image in middle if available
+                if len(images) > 1 and len(content_parts) > 3:
+                    mid_point = len(content_parts) // 2
+                    content_parts.insert(mid_point, f'<img src="{images[1]}" alt="Article image">')
+                
+                content = '\n\n'.join(content_parts)
             else:
                 # Fallback to newspaper3k text
                 content = article.text or ""
+                # Add main image if found
+                if images:
+                    content = f'<img src="{images[0]}" alt="Article image">\n\n' + content
         else:
             content = article.text or ""
         
@@ -74,6 +122,7 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
         try:
             from bs4 import BeautifulSoup
             import requests
+            from urllib.parse import urljoin
             
             response = requests.get(url, timeout=10, headers={
                 'User-Agent': 'Mozilla/5.0 (compatible; O1VisaBot/1.0)'
@@ -111,10 +160,32 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
             )
             
             if main_content:
+                # Extract images
+                images = []
+                for img in main_content.find_all('img'):
+                    img_src = img.get('src', '')
+                    if img_src:
+                        img_src = urljoin(url, img_src)
+                        # Filter junk
+                        if not any(x in img_src.lower() for x in ['logo', 'icon', 'ad', 'banner']):
+                            images.append(img_src)
+                
                 # Extract paragraphs for proper structure
                 paragraphs = main_content.find_all('p')
                 if paragraphs:
-                    content = '\n\n'.join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
+                    content_parts = []
+                    
+                    # Add first image
+                    if images:
+                        content_parts.append(f'<img src="{images[0]}" alt="Article image">')
+                    
+                    # Add paragraphs
+                    for p in paragraphs:
+                        p_text = p.get_text().strip()
+                        if p_text:
+                            content_parts.append(p_text)
+                    
+                    content = '\n\n'.join(content_parts)
                 else:
                     content = main_content.get_text(separator='\n\n').strip()
             else:
@@ -265,8 +336,9 @@ def convert_webpage_to_pdf_with_margins(
             }}
             
             .url-display::before {{
-                content: "🔗 ";
-                color: #ccc;
+                content: "↗ ";
+                color: #999;
+                font-weight: bold;
             }}
             
             p {{
@@ -290,13 +362,9 @@ def convert_webpage_to_pdf_with_margins(
                 max-width: 100%;
                 height: auto;
                 display: block;
-                margin: 15pt auto;
-            }}
-            
-            /* Remove navigation images and ads */
-            img[src*="logo"], img[src*="ad"], img[src*="banner"], 
-            img[src*="thumb"], img[width="1"], img[height="1"] {{
-                display: none;
+                margin: 20pt auto;
+                border: 1px solid #eee;
+                padding: 5pt;
             }}
             
             .footer {{
@@ -344,27 +412,28 @@ def convert_webpage_to_pdf_with_margins(
 def _format_content_to_html(text: str) -> str:
     """
     Convert plain text to HTML paragraphs.
-    Preserves structure for authentic look.
+    Handles embedded <img> tags for images.
     """
     if not text:
         return ""
     
     # Split into paragraphs
-    paragraphs = text.split('\n\n')
+    parts = text.split('\n\n')
     
     html_parts = []
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
+    for part in parts:
+        part = part.strip()
+        if not part:
             continue
         
-        # Escape HTML but preserve structure
-        para = para.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        
-        # Preserve common formatting patterns from original text
-        # (newspaper3k strips HTML but sometimes leaves formatting clues)
-        
-        html_parts.append(f"<p>{para}</p>")
+        # Check if this is an image tag
+        if part.startswith('<img'):
+            # Already HTML, keep as-is
+            html_parts.append(part)
+        else:
+            # Text paragraph - escape HTML
+            part = part.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            html_parts.append(f"<p>{part}</p>")
     
     return '\n'.join(html_parts)
 
