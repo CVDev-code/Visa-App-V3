@@ -211,7 +211,7 @@ def ai_search_for_evidence(
             
             # Use OpenAI to analyze which results are most relevant
             search_results_text = "\n\n".join([
-                f"URL: {r.get('url', 'N/A')}\nTitle: {r.get('title', 'N/A')}\nContent Preview: {r.get('content', '')[:500]}..."
+                f"URL: {r.get('url', 'N/A')}\nTitle: {r.get('title', 'N/A')}\nContent Preview: {(r.get('content') or '')[:500]}..."
                 for r in search_results
                 if r and isinstance(r, dict)
             ])
