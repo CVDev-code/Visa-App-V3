@@ -14,7 +14,7 @@ def render_research_tab():
     4. Convert approved → PDFs go to Highlighter tab
     """
     
-    st.header("🔍 AI Research Assistant")
+    st.header("🔎 AI Research Assistant")
     st.markdown("""
     AI searches for evidence and shows you relevant excerpts. 
     Approve the best ones, then convert to PDFs.
@@ -56,7 +56,9 @@ def render_research_tab():
     if clear_btn:
         st.session_state.research_results = {}
         st.session_state.research_approvals = {}
+        st.session_state.research_pdfs = {}  # Also clear PDFs
         st.success("Cleared.")
+        st.rerun()
     
     if search_btn:
         with st.spinner("🤖 AI is searching... This may take 30-60 seconds."):
@@ -268,7 +270,8 @@ def render_research_tab():
                     status_text = st.empty()
                     
                     def progress_callback(processed, total, message):
-                        progress_bar.progress(processed / total)
+                        if total > 0:
+                            progress_bar.progress(min(processed / total, 1.0))
                         status_text.text(message)
                     
                     pdfs = batch_convert_urls_to_pdfs(
@@ -276,16 +279,26 @@ def render_research_tab():
                         progress_callback=progress_callback
                     )
                     
+                    # Save to session state
                     st.session_state.research_pdfs = pdfs
                     
                     progress_bar.progress(1.0)
                     status_text.text("✅ Done!")
                     
-                    st.success(f"""
-                    ✅ Converted {total_approved} sources!
+                    # Count successful conversions
+                    total_converted = sum(len(pdf_dict) for pdf_dict in pdfs.values())
                     
-                    Switch to **PDF Highlighter** tab to continue.
-                    """)
+                    if total_converted > 0:
+                        st.success(f"""
+                        ✅ Converted {total_converted} sources!
+                        
+                        Switch to **PDF Highlighter** tab to continue.
+                        """)
+                    else:
+                        st.warning("⚠️ No PDFs were converted. Check the error messages above.")
                     
                 except Exception as e:
+                    import traceback
                     st.error(f"Error: {str(e)}")
+                    with st.expander("Full error traceback"):
+                        st.code(traceback.format_exc())
