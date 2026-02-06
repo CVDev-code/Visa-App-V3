@@ -7,12 +7,12 @@ python-dotenv>=1.0.1
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
+lxml_html_clean>=0.3.1
 reportlab>=4.0.0
 newspaper3k>=0.2.8
 
-# WeasyPrint with specific working versions for Streamlit Cloud
+# WeasyPrint with working versions for Streamlit Cloud
 weasyprint==62.3
-pycairo>=1.20.0
 cairocffi>=1.6.0
 
 # Tavily for high-quality web search
