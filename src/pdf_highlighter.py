@@ -29,6 +29,11 @@ GAP_FROM_HIGHLIGHTS = 10.0
 GAP_BETWEEN_CALLOUTS = 8.0
 ENDPOINT_PULLBACK = 1.5
 
+# ---- NEW: Annotation improvement constants ----
+MIN_ANNOTATION_SPACING = 25.0   # Minimum vertical gap between annotations
+MAX_ANNOTATION_DRIFT = 50.0     # Max distance from ideal Y position
+OVERLAP_TOLERANCE = 2.0         # Extra padding to detect overlaps
+
 # Arrowhead
 ARROW_LEN = 9.0
 ARROW_HALF_WIDTH = 4.5
@@ -639,7 +644,7 @@ def _place_annotation_in_margin(
 
             dx = abs(_center(cand).x - target_c.x)
             dy_zero_penalty = 5.0 if dy == 0 else 0.0
-            score = (0 if safe else 10_000) + dx * 0.8 + abs(dy) * 0.15 + dy_zero_penalty
+            score = (0 if safe else 10_000) + dx * 0.5 + abs(dy) * 5.0 + dy_zero_penalty
 
             if best is None or score < best[0]:
                 best = (score, cand, wrapped_text, fs, safe)
@@ -683,6 +688,58 @@ def _place_annotation_in_margin(
 # Main annotation entrypoint
 # ============================================================
 
+
+# ============================================================
+# Smart line routing to avoid obstacles
+# ============================================================
+
+def _draw_routed_line(
+    page: fitz.Page,
+    start: fitz.Point,
+    end: fitz.Point,
+    obstacles: List[fitz.Rect],
+) -> None:
+    """
+    Draw L-shaped line that avoids obstacles.
+    Tries horizontal-then-vertical and vertical-then-horizontal,
+    chooses path with fewer obstacle intersections.
+    """
+    # Try direct line first
+    direct_hits = sum(1 for obs in obstacles if _segment_hits_rect(start, end, obs))
+    
+    if direct_hits == 0:
+        # Direct line is clear
+        page.draw_line(start, end, color=RED, width=LINE_WIDTH)
+        _draw_arrowhead(page, start, end)
+        return
+    
+    # Path 1: Horizontal first, then vertical
+    mid1 = fitz.Point(end.x, start.y)
+    path1_hits = (
+        sum(1 for obs in obstacles if _segment_hits_rect(start, mid1, obs)) +
+        sum(1 for obs in obstacles if _segment_hits_rect(mid1, end, obs))
+    )
+    
+    # Path 2: Vertical first, then horizontal  
+    mid2 = fitz.Point(start.x, end.y)
+    path2_hits = (
+        sum(1 for obs in obstacles if _segment_hits_rect(start, mid2, obs)) +
+        sum(1 for obs in obstacles if _segment_hits_rect(mid2, end, obs))
+    )
+    
+    # Choose better path
+    if path1_hits <= path2_hits:
+        # Use path 1: horizontal then vertical
+        page.draw_line(start, mid1, color=RED, width=LINE_WIDTH)
+        page.draw_line(mid1, end, color=RED, width=LINE_WIDTH)
+        _draw_arrowhead(page, mid1, end)
+    else:
+        # Use path 2: vertical then horizontal
+        page.draw_line(start, mid2, color=RED, width=LINE_WIDTH)
+        page.draw_line(mid2, end, color=RED, width=LINE_WIDTH)
+        _draw_arrowhead(page, mid2, end)
+
+
 def annotate_pdf_bytes(
     pdf_bytes: bytes,
     quote_terms: List[str],
@@ -698,6 +755,8 @@ def annotate_pdf_bytes(
     total_quote_hits = 0
     total_meta_hits = 0
     occupied_callouts: List[fitz.Rect] = []
+    left_annotation_count = 0
+    right_annotation_count = 0
 
     # Track quote hits with page index for multi-page connectors
     quote_hits_by_page: Dict[int, List[fitz.Rect]] = {}
@@ -776,12 +835,37 @@ def annotate_pdf_bytes(
         if not cleaned_targets_by_page:
             return
 
-        # Draw red boxes on all pages where found
-        for pi, rects in cleaned_targets_by_page.items():
+        # Box only FIRST occurrence, avoid double-boxing with quotes
+        boxed_any = False
+        
+        # Try all occurrences in order until we box one
+        for pi in sorted(cleaned_targets_by_page.keys()):
+            if boxed_any:
+                break
+            
             p = doc.load_page(pi)
-            for r in rects:
-                p.draw_rect(r, color=RED, width=BOX_WIDTH)
-                total_meta_hits += 1
+            page_quote_boxes = quote_hits_by_page.get(pi, [])
+            
+            for r in cleaned_targets_by_page[pi]:
+                # Check if overlaps any quote box (quotes take priority)
+                overlaps_quote = any(
+                    r.intersects(inflate_rect(qr, OVERLAP_TOLERANCE)) 
+                    for qr in page_quote_boxes
+                )
+                
+                if not overlaps_quote:
+                    # This is the first non-overlapping occurrence - box it
+                    p.draw_rect(r, color=RED, width=BOX_WIDTH)
+                    total_meta_hits += 1
+                    
+                    # Keep only this occurrence for connector
+                    cleaned_targets_by_page = {pi: [r]}
+                    boxed_any = True
+                    break
+        
+        # If all occurrences overlap quotes, don't box any metadata for this field
+        if not boxed_any:
+            return
 
         # Place the annotation (callout) on page 1
         # For placement heuristics, we use the union of page-1 targets if any, else union of first found page.
@@ -792,7 +876,8 @@ def annotate_pdf_bytes(
             placement_targets = cleaned_targets_by_page[first_pi]
 
         callout_rect, wrapped_text, fs, _safe = _place_annotation_in_margin(
-            page1, placement_targets, occupied_callouts, label
+            page1, placement_targets, occupied_callouts, label,
+            left_annotation_count, right_annotation_count
         )
 
         footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
@@ -819,6 +904,12 @@ def annotate_pdf_bytes(
         )
 
         occupied_callouts.append(final_rect)
+        
+        # Track which side this annotation is on
+        if final_rect.x0 < page1.rect.width / 2:
+            left_annotation_count += 1
+        else:
+            right_annotation_count += 1
 
         # Store connector instructions to draw after all callouts exist
         connectors_to_draw.append(
@@ -859,10 +950,14 @@ def annotate_pdf_bytes(
 
             for r in rects:
                 if pi == 0:
-                    # Same-page: simple line + arrowhead
+                    # Same-page: route around obstacles
                     s, e = _edge_to_edge_points(final_rect, r)
-                    page1.draw_line(s, e, color=RED, width=LINE_WIDTH)
-                    _draw_arrowhead(page1, s, e)
+                    
+                    # Collect obstacles (all red boxes + all annotations)
+                    obstacles = quote_hits_by_page.get(0, []) + occupied_callouts
+                    
+                    # Use smart routing
+                    _draw_routed_line(page1, s, e, obstacles)
                 else:
                     _draw_multipage_connector(doc, callout_page_index, final_rect, pi, r)
 
