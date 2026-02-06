@@ -118,7 +118,14 @@ def convert_webpage_to_pdf_with_margins(
         return _convert_with_reportlab(webpage_data, left_margin_mm, right_margin_mm, 
                                         top_margin_mm, bottom_margin_mm)
     
-    # Create clean HTML with margins
+    # Create clean HTML with professional formatting (matches Bachtrack style)
+    # Extract publication name from URL
+    publication = _extract_publication_name(webpage_data.get('url', ''))
+    title = webpage_data.get('title', 'Untitled')
+    author = webpage_data.get('author', '')
+    date = webpage_data.get('date', '')
+    url = webpage_data.get('url', '')
+    
     html_template = f"""
     <!DOCTYPE html>
     <html>
@@ -131,46 +138,97 @@ def convert_webpage_to_pdf_with_margins(
                 margin-right: {right_margin_mm}mm;
                 margin-top: {top_margin_mm}mm;
                 margin-bottom: {bottom_margin_mm}mm;
+                
+                @top-center {{
+                    content: "{publication}";
+                    font-family: Arial, Helvetica, sans-serif;
+                    font-size: 9pt;
+                    color: #666;
+                    padding-bottom: 5pt;
+                    border-bottom: 1px solid #ddd;
+                }}
+                
+                @bottom-left {{
+                    content: "{date}";
+                    font-family: Arial, Helvetica, sans-serif;
+                    font-size: 8pt;
+                    color: #666;
+                }}
+                
+                @bottom-center {{
+                    content: "{title[:60]}{'...' if len(title) > 60 else ''}";
+                    font-family: Arial, Helvetica, sans-serif;
+                    font-size: 8pt;
+                    color: #666;
+                }}
+                
+                @bottom-right {{
+                    content: counter(page) " / " counter(pages);
+                    font-family: Arial, Helvetica, sans-serif;
+                    font-size: 8pt;
+                    color: #666;
+                }}
             }}
             body {{
-                font-family: 'Georgia', 'Times New Roman', serif;
+                font-family: Arial, Helvetica, sans-serif;
                 font-size: 11pt;
                 line-height: 1.6;
                 color: #000;
                 max-width: 100%;
             }}
             h1 {{
-                font-size: 18pt;
-                margin-bottom: 10pt;
-                color: #000;
-            }}
-            .metadata {{
-                font-size: 9pt;
-                color: #666;
+                font-size: 20pt;
+                font-weight: bold;
+                margin-top: 0;
                 margin-bottom: 15pt;
-                border-bottom: 1px solid #ccc;
-                padding-bottom: 10pt;
+                color: #000;
+                line-height: 1.3;
             }}
-            .url {{
+            .url-link {{
                 font-size: 8pt;
                 color: #0066cc;
                 word-wrap: break-word;
+                margin-bottom: 10pt;
+                display: block;
+            }}
+            .byline {{
+                font-size: 10pt;
+                color: #333;
+                margin-bottom: 15pt;
+            }}
+            .author {{
+                font-weight: normal;
+            }}
+            .date {{
+                float: right;
+                font-weight: normal;
+            }}
+            .divider {{
+                border-bottom: 1px solid #ddd;
+                margin: 15pt 0;
+                clear: both;
             }}
             p {{
-                margin-bottom: 10pt;
+                margin-bottom: 12pt;
                 text-align: justify;
+                hyphens: auto;
             }}
-            /* Remove any images/iframes that might mess up layout */
+            /* Remove images to avoid layout issues */
             img, iframe {{ display: none; }}
         </style>
     </head>
     <body>
-        <h1>{webpage_data.get('title', 'Untitled')}</h1>
-        <div class="metadata">
-            {f"<strong>Author:</strong> {webpage_data.get('author')}<br>" if webpage_data.get('author') else ""}
-            {f"<strong>Date:</strong> {webpage_data.get('date')}<br>" if webpage_data.get('date') else ""}
-            <div class="url">{webpage_data.get('url', '')}</div>
+        <h1>{title}</h1>
+        
+        <div class="url-link">{url}</div>
+        
+        <div class="byline">
+            <span class="author">{author}</span>
+            <span class="date">{date}</span>
         </div>
+        
+        <div class="divider"></div>
+        
         <div class="content">
             {_format_content_to_html(webpage_data.get('content', ''))}
         </div>
@@ -184,6 +242,45 @@ def convert_webpage_to_pdf_with_margins(
     pdf_bytes = html.write_pdf(font_config=font_config)
     
     return pdf_bytes
+
+
+def _extract_publication_name(url: str) -> str:
+    """Extract publication name from URL for header."""
+    if not url:
+        return ""
+    
+    # Common publication domains
+    publications = {
+        'bachtrack.com': 'Bachtrack',
+        'nytimes.com': 'The New York Times',
+        'theguardian.com': 'The Guardian',
+        'gramophone.co.uk': 'Gramophone',
+        'operanews.com': 'Opera News',
+        'musicalamerica.com': 'Musical America',
+        'ft.com': 'Financial Times',
+        'operawire.com': 'OperaWire',
+        'seen-and-heard-international.com': 'Seen and Heard International',
+        'metopera.org': 'Metropolitan Opera',
+        'roh.org.uk': 'Royal Opera House',
+        'washingtonpost.com': 'The Washington Post',
+        'telegraph.co.uk': 'The Telegraph',
+        'independent.co.uk': 'The Independent'
+    }
+    
+    # Extract domain
+    try:
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc.replace('www.', '')
+        
+        # Check if it matches known publications
+        for key, name in publications.items():
+            if key in domain:
+                return name
+        
+        # Return domain as fallback
+        return domain.replace('.com', '').replace('.org', '').replace('.uk', '').title()
+    except:
+        return ""
 
 
 def _format_content_to_html(text: str) -> str:
