@@ -109,11 +109,14 @@ with tab2:
     
     # Add research PDFs as virtual files
     if research_pdfs:
+        file_counter = 0
         for criterion_id, pdfs_dict in research_pdfs.items():
             for filename, pdf_bytes in pdfs_dict.items():
-                # Create a virtual file object
+                # Create a virtual file object with unique name
+                file_counter += 1
                 virtual_file = io.BytesIO(pdf_bytes)
-                virtual_file.name = f"[Research] {filename}"
+                # Add unique counter to prevent duplicate names
+                virtual_file.name = f"[Research_C{criterion_id}_{file_counter}] {filename}"
                 virtual_file.seek(0)
                 all_files.append(virtual_file)
     
