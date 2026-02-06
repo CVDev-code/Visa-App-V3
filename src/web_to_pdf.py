@@ -189,8 +189,8 @@ def convert_webpage_to_pdf_with_margins(
             body {{
                 font-family: Georgia, 'Times New Roman', Times, serif;
                 font-size: 11pt;
-                line-height: 1.4;
-                color: #000;
+                line-height: 1.5;
+                color: #333;
                 text-align: left;
                 hyphens: none;
                 margin: 0;
@@ -198,40 +198,67 @@ def convert_webpage_to_pdf_with_margins(
             }}
             
             h1 {{
-                font-size: 22pt;
+                font-size: 28pt;
                 font-weight: bold;
-                margin: 0 0 10pt 0;
+                margin: 0 0 8pt 0;
                 padding: 0;
                 color: #000;
-                line-height: 1.2;
+                line-height: 1.1;
+            }}
+            
+            .divider {{
+                border-bottom: 1px solid #ddd;
+                margin: 8pt 0 10pt 0;
             }}
             
             .url-display {{
                 font-size: 9pt;
                 color: #666;
-                margin: 0 0 15pt 0;
+                margin: 0 0 20pt 0;
                 text-decoration: none;
                 word-wrap: break-word;
             }}
             
             .url-display::before {{
-                content: "🔗 ";
-                color: #999;
+                content: "🌐 ";
+                font-size: 10pt;
+            }}
+            
+            .author {{
+                font-size: 10pt;
+                color: #000;
+                font-weight: bold;
+                font-style: italic;
+                margin: 0 0 25pt 0;
             }}
             
             p {{
-                margin: 0 0 10pt 0;
+                margin: 0 0 12pt 0;
                 padding: 0;
             }}
             
-            /* Remove images */
-            img, iframe {{ display: none; }}
+            img {{
+                max-width: 100%;
+                height: auto;
+                display: block;
+                margin: 15pt auto;
+            }}
+            
+            /* Remove navigation images and ads */
+            img[src*="logo"], img[src*="ad"], img[src*="banner"], 
+            img[src*="thumb"], img[width="1"], img[height="1"] {{
+                display: none;
+            }}
         </style>
     </head>
     <body>
         <h1>{title}</h1>
         
+        <div class="divider"></div>
+        
         <div class="url-display">{display_url}</div>
+        
+        {f'<div class="author">{author}</div>' if author else ''}
         
         <div class="content">
             {_format_content_to_html(content)}
