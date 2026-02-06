@@ -92,18 +92,19 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
 
 def convert_webpage_to_pdf_with_margins(
     webpage_data: Dict[str, str],
-    left_margin_mm: float = 40,
-    right_margin_mm: float = 40,
+    left_margin_mm: float = 20,
+    right_margin_mm: float = 20,
     top_margin_mm: float = 20,
     bottom_margin_mm: float = 20
 ) -> bytes:
     """
-    Convert webpage content to PDF with controlled margins for annotations.
+    Convert webpage content to PDF matching Opera Today print style.
+    Uses 20mm margins (compromise between tight print and annotation space).
     
     Args:
         webpage_data: Dictionary from fetch_webpage_content()
-        left_margin_mm: Left margin in millimeters (for annotations)
-        right_margin_mm: Right margin in millimeters (for annotations)
+        left_margin_mm: Left margin in millimeters
+        right_margin_mm: Right margin in millimeters
         top_margin_mm: Top margin in millimeters
         bottom_margin_mm: Bottom margin in millimeters
         
@@ -118,14 +119,21 @@ def convert_webpage_to_pdf_with_margins(
         return _convert_with_reportlab(webpage_data, left_margin_mm, right_margin_mm, 
                                         top_margin_mm, bottom_margin_mm)
     
-    # Create clean HTML with professional formatting (matches Bachtrack style)
-    # Extract publication name from URL
-    publication = _extract_publication_name(webpage_data.get('url', ''))
+    # Extract data
     title = webpage_data.get('title', 'Untitled')
     author = webpage_data.get('author', '')
     date = webpage_data.get('date', '')
     url = webpage_data.get('url', '')
+    content = webpage_data.get('content', '')
     
+    # Get current timestamp for footer (like browser print)
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%m/%d/%Y, %H:%M")
+    
+    # Shorten URL for display (remove https://)
+    display_url = url.replace('https://', '').replace('http://', '')
+    
+    # Create HTML with Opera Today exact styling
     html_template = f"""
     <!DOCTYPE html>
     <html>
@@ -134,103 +142,68 @@ def convert_webpage_to_pdf_with_margins(
         <style>
             @page {{
                 size: letter;
-                margin-left: {left_margin_mm}mm;
-                margin-right: {right_margin_mm}mm;
-                margin-top: {top_margin_mm}mm;
-                margin-bottom: {bottom_margin_mm}mm;
-                
-                @top-center {{
-                    content: "{publication}";
-                    font-family: Arial, Helvetica, sans-serif;
-                    font-size: 9pt;
-                    color: #666;
-                    padding-bottom: 5pt;
-                    border-bottom: 1px solid #ddd;
-                }}
+                margin: {top_margin_mm}mm {right_margin_mm}mm {bottom_margin_mm}mm {left_margin_mm}mm;
                 
                 @bottom-left {{
-                    content: "{date}";
-                    font-family: Arial, Helvetica, sans-serif;
+                    content: "{timestamp}  {title[:40]}{'...' if len(title) > 40 else ''}";
+                    font-family: 'Times New Roman', Times, serif;
                     font-size: 8pt;
-                    color: #666;
-                }}
-                
-                @bottom-center {{
-                    content: "{title[:60]}{'...' if len(title) > 60 else ''}";
-                    font-family: Arial, Helvetica, sans-serif;
-                    font-size: 8pt;
-                    color: #666;
+                    color: #000;
+                    white-space: pre;
                 }}
                 
                 @bottom-right {{
-                    content: counter(page) " / " counter(pages);
-                    font-family: Arial, Helvetica, sans-serif;
+                    content: counter(page) "/" counter(pages);
+                    font-family: 'Times New Roman', Times, serif;
                     font-size: 8pt;
-                    color: #666;
+                    color: #000;
                 }}
             }}
+            
             body {{
                 font-family: Arial, Helvetica, sans-serif;
-                font-size: 11pt;
-                line-height: 1.6;
-                color: #000;
-                max-width: 100%;
+                font-size: 12pt;
+                line-height: 1.2;
+                color: #111;
+                text-align: left;
+                hyphens: none;
+                margin: 0;
+                padding: 0;
             }}
+            
             h1 {{
-                font-size: 20pt;
+                font-size: 18pt;
                 font-weight: bold;
-                margin-top: 0;
-                margin-bottom: 15pt;
+                margin: 0 0 6pt 0;
+                padding: 0;
                 color: #000;
-                line-height: 1.3;
+                line-height: 1.2;
             }}
-            .url-link {{
-                font-size: 8pt;
-                color: #0066cc;
+            
+            .url-display {{
+                font-size: 9pt;
+                color: #000;
+                margin: 0 0 10pt 0;
+                text-decoration: none;
                 word-wrap: break-word;
-                margin-bottom: 10pt;
-                display: block;
             }}
-            .byline {{
-                font-size: 10pt;
-                color: #333;
-                margin-bottom: 15pt;
-            }}
-            .author {{
-                font-weight: normal;
-            }}
-            .date {{
-                float: right;
-                font-weight: normal;
-            }}
-            .divider {{
-                border-bottom: 1px solid #ddd;
-                margin: 15pt 0;
-                clear: both;
-            }}
+            
             p {{
-                margin-bottom: 12pt;
-                text-align: justify;
-                hyphens: auto;
+                margin: 0 0 12pt 0;
+                padding: 0;
             }}
-            /* Remove images to avoid layout issues */
+            
+            /* Remove images */
             img, iframe {{ display: none; }}
         </style>
     </head>
     <body>
         <h1>{title}</h1>
         
-        <div class="url-link">{url}</div>
-        
-        <div class="byline">
-            <span class="author">{author}</span>
-            <span class="date">{date}</span>
-        </div>
-        
-        <div class="divider"></div>
+        <div class="url-display">{display_url}</div>
         
         <div class="content">
-            {_format_content_to_html(webpage_data.get('content', ''))}
+            {_format_content_to_html(content)}
         </div>
     </body>
     </html>
@@ -242,45 +215,6 @@ def convert_webpage_to_pdf_with_margins(
     pdf_bytes = html.write_pdf(font_config=font_config)
     
     return pdf_bytes
-
-
-def _extract_publication_name(url: str) -> str:
-    """Extract publication name from URL for header."""
-    if not url:
-        return ""
-    
-    # Common publication domains
-    publications = {
-        'bachtrack.com': 'Bachtrack',
-        'nytimes.com': 'The New York Times',
-        'theguardian.com': 'The Guardian',
-        'gramophone.co.uk': 'Gramophone',
-        'operanews.com': 'Opera News',
-        'musicalamerica.com': 'Musical America',
-        'ft.com': 'Financial Times',
-        'operawire.com': 'OperaWire',
-        'seen-and-heard-international.com': 'Seen and Heard International',
-        'metopera.org': 'Metropolitan Opera',
-        'roh.org.uk': 'Royal Opera House',
-        'washingtonpost.com': 'The Washington Post',
-        'telegraph.co.uk': 'The Telegraph',
-        'independent.co.uk': 'The Independent'
-    }
-    
-    # Extract domain
-    try:
-        from urllib.parse import urlparse
-        domain = urlparse(url).netloc.replace('www.', '')
-        
-        # Check if it matches known publications
-        for key, name in publications.items():
-            if key in domain:
-                return name
-        
-        # Return domain as fallback
-        return domain.replace('.com', '').replace('.org', '').replace('.uk', '').title()
-    except:
-        return ""
 
 
 def _format_content_to_html(text: str) -> str:
@@ -419,11 +353,11 @@ def batch_convert_urls_to_pdfs(
                 if progress_callback:
                     progress_callback(processed, total_urls, f"Converting: {title}")
                 
-                # Convert to PDF with margins
+                # Convert to PDF with 20mm margins (Opera Today style)
                 pdf_bytes = convert_webpage_to_pdf_with_margins(
                     webpage_data,
-                    left_margin_mm=40,  # Space for annotations
-                    right_margin_mm=40,
+                    left_margin_mm=20,
+                    right_margin_mm=20,
                     top_margin_mm=20,
                     bottom_margin_mm=20
                 )
