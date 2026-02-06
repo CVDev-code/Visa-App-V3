@@ -122,6 +122,8 @@ def convert_webpage_to_pdf_with_margins(
     Convert webpage content to PDF matching Opera Today print style.
     Uses 30mm margins for annotation space.
     
+    REQUIRES WeasyPrint - will fail if not installed.
+    
     Args:
         webpage_data: Dictionary from fetch_webpage_content()
         left_margin_mm: Left margin in millimeters
@@ -132,13 +134,8 @@ def convert_webpage_to_pdf_with_margins(
     Returns:
         PDF bytes
     """
-    try:
-        from weasyprint import HTML, CSS
-        from weasyprint.text.fonts import FontConfiguration
-    except ImportError:
-        # Fallback: use reportlab (more basic but works)
-        return _convert_with_reportlab(webpage_data, left_margin_mm, right_margin_mm, 
-                                        top_margin_mm, bottom_margin_mm)
+    from weasyprint import HTML, CSS
+    from weasyprint.text.fonts import FontConfiguration
     
     # Extract data
     title = webpage_data.get('title', 'Untitled')
@@ -276,97 +273,6 @@ def _format_content_to_html(text: str) -> str:
     return '\n'.join(html_paragraphs)
 
 
-def _convert_with_reportlab(
-    webpage_data: Dict[str, str],
-    left_margin_mm: float,
-    right_margin_mm: float,
-    top_margin_mm: float,
-    bottom_margin_mm: float
-) -> bytes:
-    """Fallback PDF generation using ReportLab (simpler, no WeasyPrint)."""
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.units import mm
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-    from reportlab.lib.enums import TA_JUSTIFY
-    
-    buffer = io.BytesIO()
-    
-    # Create PDF with margins
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=letter,
-        leftMargin=left_margin_mm * mm,
-        rightMargin=right_margin_mm * mm,
-        topMargin=top_margin_mm * mm,
-        bottomMargin=bottom_margin_mm * mm
-    )
-    
-    styles = getSampleStyleSheet()
-    
-    # Title style
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=24,
-        textColor='#000000',
-        spaceAfter=12,
-        leading=28
-    )
-    
-    # Body style
-    body_style = ParagraphStyle(
-        'CustomBody',
-        parent=styles['BodyText'],
-        fontSize=11,
-        leading=16,
-        alignment=TA_JUSTIFY,
-        spaceAfter=12
-    )
-    
-    # Metadata style
-    metadata_style = ParagraphStyle(
-        'Metadata',
-        parent=styles['Normal'],
-        fontSize=9,
-        textColor='#666666',
-        spaceAfter=6
-    )
-    
-    # Build content
-    story = []
-    
-    # Title
-    title = webpage_data.get('title', 'Untitled')
-    story.append(Paragraph(title, title_style))
-    story.append(Spacer(1, 6))
-    
-    # Metadata
-    metadata_parts = []
-    if webpage_data.get('author'):
-        metadata_parts.append(f"<b>Author:</b> {webpage_data['author']}")
-    if webpage_data.get('date'):
-        metadata_parts.append(f"<b>Date:</b> {webpage_data['date']}")
-    metadata_parts.append(f"<b>URL:</b> {webpage_data.get('url', '')}")
-    
-    story.append(Paragraph('<br/>'.join(metadata_parts), metadata_style))
-    story.append(Spacer(1, 12))
-    
-    # Content paragraphs
-    content = webpage_data.get('content', '')
-    for para in content.split('\n\n'):
-        para = para.strip()
-        if para:
-            # Escape HTML entities
-            para = para.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            story.append(Paragraph(para, body_style))
-    
-    # Generate PDF
-    doc.build(story)
-    buffer.seek(0)
-    return buffer.getvalue()
-
-
 def batch_convert_urls_to_pdfs(
     urls_by_criterion: Dict[str, list],
     progress_callback=None
@@ -388,6 +294,7 @@ def batch_convert_urls_to_pdfs(
         }
     """
     result = {}
+    errors = []  # Collect errors to show later
     total_urls = sum(len(urls) for urls in urls_by_criterion.values())
     processed = 0
     
@@ -425,9 +332,18 @@ def batch_convert_urls_to_pdfs(
                 processed += 1
                 
             except Exception as e:
+                error_msg = f"❌ {title}: {str(e)}"
+                errors.append(error_msg)
                 if progress_callback:
-                    progress_callback(processed, total_urls, f"Error: {title} - {str(e)}")
+                    progress_callback(processed, total_urls, error_msg)
                 processed += 1
                 continue
+    
+    # Print errors so they show in Streamlit
+    if errors:
+        print("\n=== CONVERSION ERRORS ===")
+        for err in errors:
+            print(err)
+        print("========================\n")
     
     return result
