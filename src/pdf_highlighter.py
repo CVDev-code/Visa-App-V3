@@ -804,6 +804,8 @@ def annotate_pdf_bytes(
         also_try_variants: Optional[List[str]] = None,
     ):
         nonlocal total_meta_hits
+        nonlocal left_annotation_count
+        nonlocal right_annotation_count
 
         needles: List[str] = []
         if value and str(value).strip():
