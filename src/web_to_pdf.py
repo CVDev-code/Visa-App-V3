@@ -4,12 +4,15 @@ Web scraping and PDF conversion for O-1 Research Assistant.
 This module fetches webpages and converts them to clean PDFs with consistent margins
 suitable for PDF annotation.
 
-IMPROVEMENTS v13:
-- Publication logo/masthead extraction for authentic branding
-- Image captions extraction and display
-- Expanded junk image filtering (social widgets, navigation, etc.)
-- Raised minimum image size from 50px to 100px
-- Better editorial vs UI image detection
+IMPROVEMENTS v14:
+- Left-aligned publication logos
+- Justified text (newspaper style)
+- Globe icon for URL (🌐 or inline SVG)
+- Double divider lines under URL (closer spacing)
+- Font detection from original HTML
+- Footer logo extraction
+- Reduced header margins (0 0 10pt 0)
+- Max image height limit (400pt)
 """
 
 import io
@@ -32,6 +35,8 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
             "content": "Full article text with <img> tags for images",
             "url": "Original URL",
             "publication_logo": "URL to publication logo/masthead (if found)",
+            "footer_logo": "URL to footer logo (if found)",
+            "font_family": "Detected font family from article",
             "raw_html": "Full HTML (for debugging)"
         }
     """
@@ -50,6 +55,12 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
         
         # Extract publication logo/masthead for branding
         publication_logo = _extract_publication_logo(soup, url)
+        
+        # Extract footer logo
+        footer_logo = _extract_footer_logo(soup, url)
+        
+        # Detect font family from article
+        font_family = _detect_article_font(soup)
         
         # Find article body
         main_content = (
@@ -110,6 +121,8 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
             "content": content,
             "url": url,
             "publication_logo": publication_logo,
+            "footer_logo": footer_logo,
+            "font_family": font_family,
             "raw_html": article.html
         }
     except Exception as e:
@@ -127,6 +140,8 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
             
             # Extract publication logo
             publication_logo = _extract_publication_logo(soup, url)
+            footer_logo = _extract_footer_logo(soup, url)
+            font_family = _detect_article_font(soup)
             
             # Extract title
             title_tag = soup.find('title') or soup.find('h1')
@@ -197,6 +212,8 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
                 "content": content,
                 "url": url,
                 "publication_logo": publication_logo,
+                "footer_logo": footer_logo,
+                "font_family": font_family,
                 "raw_html": str(soup)
             }
         except Exception as e2:
@@ -260,6 +277,90 @@ def _extract_publication_logo(soup, url: str) -> Optional[str]:
                 break
     
     return publication_logo
+
+
+def _extract_footer_logo(soup, url: str) -> Optional[str]:
+    """
+    Extract footer logo for PDF footer branding.
+    
+    Args:
+        soup: BeautifulSoup object
+        url: Original URL (for converting relative paths)
+        
+    Returns:
+        URL to footer logo image, or None if not found
+    """
+    from urllib.parse import urljoin
+    
+    footer_logo = None
+    
+    # Look in footer elements
+    footer = soup.find('footer')
+    if footer:
+        logo_candidates = footer.find_all('img', class_=lambda x: x and (
+            'logo' in str(x).lower() or 
+            'brand' in str(x).lower()
+        ), limit=3)
+        
+        for logo_img in logo_candidates:
+            logo_src = logo_img.get('src') or logo_img.get('data-src')
+            if logo_src:
+                footer_logo = urljoin(url, logo_src)
+                break
+    
+    return footer_logo
+
+
+def _detect_article_font(soup) -> str:
+    """
+    Detect the font family used in the article from HTML/CSS.
+    
+    Args:
+        soup: BeautifulSoup object
+        
+    Returns:
+        Font family name (fallback to Arial if not detected)
+    """
+    font_family = "Arial, Helvetica, sans-serif"  # Default fallback
+    
+    # Method 1: Check article/main content for inline styles
+    main_content = (
+        soup.find('article') or 
+        soup.find('main') or 
+        soup.find('div', class_=['content', 'article', 'post'])
+    )
+    
+    if main_content:
+        style = main_content.get('style', '')
+        if 'font-family' in style:
+            # Extract font-family from inline style
+            import re
+            match = re.search(r'font-family:\s*([^;]+)', style)
+            if match:
+                font_family = match.group(1).strip()
+    
+    # Method 2: Check <style> tags for common article classes
+    if font_family == "Arial, Helvetica, sans-serif":
+        style_tags = soup.find_all('style')
+        for style_tag in style_tags:
+            style_content = style_tag.string or ""
+            # Look for article/body font definitions
+            if 'font-family' in style_content:
+                import re
+                # Try to find article or body font
+                match = re.search(r'(?:article|\.article|body|\.content)[^}]*font-family:\s*([^;]+)', style_content)
+                if match:
+                    font_family = match.group(1).strip()
+                    break
+    
+    # Clean up font family (remove quotes, clean syntax)
+    font_family = font_family.replace('"', '').replace("'", "").strip()
+    
+    # Ensure we always have a fallback
+    if not font_family or font_family == "":
+        font_family = "Arial, Helvetica, sans-serif"
+    
+    return font_family
 
 
 def _extract_images_with_captions(soup, url: str, limit: int = 2) -> List[Dict[str, str]]:
@@ -470,6 +571,8 @@ def convert_webpage_to_pdf_with_margins(
     url = webpage_data.get('url', '')
     content = webpage_data.get('content', '')
     publication_logo = webpage_data.get('publication_logo')
+    footer_logo = webpage_data.get('footer_logo')
+    font_family = webpage_data.get('font_family', 'Arial, Helvetica, sans-serif')
     
     # Get current timestamp for footer (like browser print)
     timestamp = datetime.now().strftime("%m/%d/%Y, %H:%M")
@@ -482,12 +585,31 @@ def convert_webpage_to_pdf_with_margins(
     parsed_url = urlparse(url)
     publication_name = parsed_url.netloc.replace('www.', '').split('.')[0].title()
     
-    # Build publication header HTML
+    # Build publication header HTML (LEFT-ALIGNED)
     publication_header = ''
     if publication_logo:
         publication_header = f'<div class="publication-header"><img src="{publication_logo}" class="publication-logo" alt="{publication_name}"></div>'
     else:
         publication_header = f'<div class="publication">{publication_name}</div>'
+    
+    # Build footer HTML (with footer logo if available)
+    footer_content = f"""
+        <div class="footer">
+            © {datetime.now().year} {publication_name}. All rights reserved.<br>
+            Original article: {display_url}<br>
+            Retrieved: {timestamp}
+        </div>
+    """
+    
+    if footer_logo:
+        footer_content = f"""
+        <div class="footer">
+            <img src="{footer_logo}" class="footer-logo" alt="{publication_name}"><br>
+            © {datetime.now().year} {publication_name}. All rights reserved.<br>
+            Original article: {display_url}<br>
+            Retrieved: {timestamp}
+        </div>
+        """
     
     # Create HTML with authentic article styling
     html_template = f"""
@@ -502,14 +624,14 @@ def convert_webpage_to_pdf_with_margins(
                 
                 @bottom-left {{
                     content: "{timestamp}";
-                    font-family: Arial, Helvetica, sans-serif;
+                    font-family: {font_family};
                     font-size: 8pt;
                     color: #666;
                 }}
                 
                 @bottom-center {{
                     content: "{publication_name}";
-                    font-family: Arial, Helvetica, sans-serif;
+                    font-family: {font_family};
                     font-size: 8pt;
                     color: #666;
                     text-transform: uppercase;
@@ -517,25 +639,26 @@ def convert_webpage_to_pdf_with_margins(
                 
                 @bottom-right {{
                     content: counter(page) "/" counter(pages);
-                    font-family: Arial, Helvetica, sans-serif;
+                    font-family: {font_family};
                     font-size: 8pt;
                     color: #666;
                 }}
             }}
             
             body {{
-                font-family: Arial, Helvetica, sans-serif;
+                font-family: {font_family};
                 font-size: 10pt;
                 line-height: 1.5;
                 color: #333;
-                text-align: left;
+                text-align: justify;
                 hyphens: none;
                 margin: 0;
                 padding: 0;
             }}
             
             .publication-header {{
-                margin: 0 0 15pt 0;
+                margin: 0 0 10pt 0;
+                text-align: left;
             }}
             
             .publication-logo {{
@@ -549,8 +672,9 @@ def convert_webpage_to_pdf_with_margins(
                 color: #999;
                 text-transform: uppercase;
                 letter-spacing: 1px;
-                margin: 0 0 15pt 0;
+                margin: 0 0 10pt 0;
                 font-weight: bold;
+                text-align: left;
             }}
             
             h1 {{
@@ -560,6 +684,7 @@ def convert_webpage_to_pdf_with_margins(
                 padding: 0;
                 color: #000;
                 line-height: 1.2;
+                text-align: left;
             }}
             
             .byline {{
@@ -567,26 +692,32 @@ def convert_webpage_to_pdf_with_margins(
                 color: #666;
                 margin: 0 0 8pt 0;
                 font-style: italic;
+                text-align: left;
             }}
             
             .divider {{
                 border-bottom: 1px solid #ddd;
-                margin: 8pt 0 15pt 0;
+                margin: 8pt 0 6pt 0;
             }}
             
             .url-display {{
                 font-size: 8pt;
                 color: #999;
-                margin: 0 0 20pt 0;
+                margin: 0 0 6pt 0;
                 text-decoration: none;
                 word-wrap: break-word;
                 font-family: 'Courier New', monospace;
+                text-align: left;
             }}
             
             .url-display::before {{
-                content: "↗ ";
-                color: #999;
-                font-weight: bold;
+                content: "🌐 ";
+                font-size: 10pt;
+            }}
+            
+            .divider-bottom {{
+                border-bottom: 1px solid #ddd;
+                margin: 6pt 0 15pt 0;
             }}
             
             p {{
@@ -607,6 +738,7 @@ def convert_webpage_to_pdf_with_margins(
             
             img {{
                 max-width: 100%;
+                max-height: 400pt;
                 height: auto;
                 display: block;
                 margin: 20pt auto;
@@ -629,6 +761,13 @@ def convert_webpage_to_pdf_with_margins(
                 font-size: 8pt;
                 color: #999;
                 line-height: 1.4;
+                text-align: left;
+            }}
+            
+            .footer-logo {{
+                max-width: 100px;
+                height: auto;
+                margin-bottom: 8pt;
             }}
         </style>
     </head>
@@ -643,15 +782,13 @@ def convert_webpage_to_pdf_with_margins(
         
         <div class="url-display">{display_url}</div>
         
+        <div class="divider-bottom"></div>
+        
         <div class="content">
             {_format_content_to_html(content)}
         </div>
         
-        <div class="footer">
-            © {datetime.now().year} {publication_name}. All rights reserved.<br>
-            Original article: {display_url}<br>
-            Retrieved: {timestamp}
-        </div>
+        {footer_content}
     </body>
     </html>
     """
