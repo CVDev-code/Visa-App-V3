@@ -5,8 +5,8 @@ python-dotenv>=1.0.1
 # OpenAI for quote extraction (PDF Highlighter tab)
 openai>=1.40.0
 
-# Google Gemini for web search (Research tab) - STABLE LIBRARY
-google-generativeai>=0.8.0
+# Google Cloud Vertex AI for web search (Research tab)
+google-cloud-aiplatform>=1.38.0
 
 # Web scraping and PDF conversion
 requests>=2.31.0
