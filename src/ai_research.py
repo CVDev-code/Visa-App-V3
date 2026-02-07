@@ -82,7 +82,7 @@ def _search_with_gemini(
         
         # Generate content with Google Search grounding
         response = client.models.generate_content(
-            model='gemini-2.0-flash-exp',
+            model='gemini-1.5-pro',  # Stable model with grounding support
             contents=search_prompt,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
