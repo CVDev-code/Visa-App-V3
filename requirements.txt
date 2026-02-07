@@ -13,6 +13,3 @@ newspaper3k>=0.2.8
 
 # WeasyPrint for PDF generation
 weasyprint>=60.0
-
-# Tavily for high-quality web search
-tavily-python>=0.3.0
