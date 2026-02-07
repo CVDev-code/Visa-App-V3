@@ -1,10 +1,6 @@
 """
 AI-Powered Research Assistant - Using Gemini's Google Search Grounding
-This uses Google's Gemini API with Google Search grounding for web research.
-
-Setup:
-- Get API key from: https://aistudio.google.com/app/apikey
-- Set GEMINI_API_KEY in Streamlit secrets or environment
+FIXED VERSION - Uses new google.genai library and fixes NameError
 """
 
 import os
@@ -51,16 +47,15 @@ def _search_with_gemini(
 ) -> List[Dict]:
     """
     Use Gemini's Google Search grounding to find sources.
-    
-    This is more reliable than OpenAI's web search and uses actual Google Search.
     """
     
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
     except ImportError:
         raise RuntimeError(
-            "Google Generative AI library not installed.\n"
-            "Install with: pip install google-generativeai"
+            "Google GenAI library not installed.\n"
+            "Install with: pip install google-genai"
         )
     
     # Get API key
@@ -72,8 +67,8 @@ def _search_with_gemini(
             "Add to Streamlit secrets or environment variables."
         )
     
-    # Configure Gemini
-    genai.configure(api_key=api_key)
+    # Configure client
+    client = genai.Client(api_key=api_key)
     
     # Build search prompt
     search_prompt = _build_search_prompt(criterion_id, criterion_desc, artist_name, target_count)
@@ -83,18 +78,19 @@ def _search_with_gemini(
     print(f"{'='*60}")
     
     try:
-        # Create model with Google Search grounding
-        model = genai.GenerativeModel(
-            'gemini-1.5-pro',
-            tools='google_search_retrieval'  # This enables Google Search
-        )
-        
         print("[Gemini Search] Searching with Google Search grounding...")
         
-        # Generate content with search
-        response = model.generate_content(search_prompt)
+        # Generate content with Google Search grounding
+        response = client.models.generate_content(
+            model='gemini-2.0-flash-exp',
+            contents=search_prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                response_modalities=['TEXT'],
+            )
+        )
         
-        # Extract text and grounding metadata
+        # Extract text
         text = response.text
         
         print(f"[Gemini Search] Response length: {len(text)} chars")
@@ -132,7 +128,7 @@ def _build_search_prompt(
         )
     else:
         # Fallback to built-in prompts
-        base_prompt = _get_default_prompt(criterion_id, artist_name, target_count)
+        base_prompt = _get_default_prompt(criterion_id, criterion_desc, artist_name, target_count)
     
     # Add Gemini-specific instructions
     gemini_instructions = f"""
@@ -157,7 +153,7 @@ Find exactly {target_count} high-quality sources that meet USCIS O-1 standards."
     return base_prompt + gemini_instructions
 
 
-def _get_default_prompt(criterion_id: str, artist_name: str, target_count: int) -> str:
+def _get_default_prompt(criterion_id: str, criterion_desc: str, artist_name: str, target_count: int) -> str:
     """Default search prompts if search_prompts.py not available."""
     
     prompts = {
@@ -298,7 +294,6 @@ def _extract_search_results(text: str, criterion_desc: str, response=None) -> Li
                 context = text[context_start:url_index]
                 
                 # Try to extract title from context
-                # Look for quoted text or capitalized phrases
                 title_match = re.search(r'["""]([^"""]+)["""]', context)
                 if title_match:
                     title_context = title_match.group(1)
@@ -377,10 +372,10 @@ def ai_search_for_evidence(
     Setup:
     - Get API key: https://aistudio.google.com/app/apikey
     - Add to secrets: GEMINI_API_KEY = "your-key-here"
-    - Install library: pip install google-generativeai
+    - Install library: pip install google-genai
     
-    Cost: ~$1-2 per application
-    Quality: Google Search level (very good)
+    Cost: ~$0.40/app (cheaper than OpenAI)
+    Quality: Google Search level (excellent)
     """
     
     print(f"\n{'='*60}")
