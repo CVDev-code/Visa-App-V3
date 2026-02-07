@@ -876,8 +876,10 @@ def annotate_pdf_bytes(
                     p.draw_rect(r, color=RED, width=BOX_WIDTH)
                     total_meta_hits += 1
                     
-                    # Keep only this occurrence for connector
-                    cleaned_targets_by_page = {pi: [r]}
+                    # Keep ONLY this occurrence for connector (don't overwrite dict structure!)
+                    # Clear all other pages/rects, keep only this one
+                    cleaned_targets_by_page.clear()
+                    cleaned_targets_by_page[pi] = [r]
                     boxed_any = True
                     break
         
@@ -939,7 +941,21 @@ def annotate_pdf_bytes(
         )
 
     # --- Meta labels (now includes ensemble) ---
-    _do_job("Original source of publication.", meta.get("source_url"), connect_policy="all")
+    # For source_url, try multiple variants (with/without protocol, with/without www)
+    source_url = meta.get("source_url")
+    source_url_variants = []
+    if source_url:
+        # Try without https://
+        without_protocol = source_url.replace('https://', '').replace('http://', '')
+        source_url_variants.append(without_protocol)
+        
+        # Try with just domain (theatermania.com)
+        if without_protocol.startswith('www.'):
+            without_www = without_protocol.replace('www.', '', 1)
+            source_url_variants.append(without_www)
+    
+    _do_job("Original source of publication.", source_url, 
+            connect_policy="all", also_try_variants=source_url_variants)
     _do_job("Venue / distinguished organisation.", meta.get("venue_name"), connect_policy="all")
     _do_job("Ensemble / performing organisation.", meta.get("ensemble_name"), connect_policy="all")
     _do_job("Performance date.", meta.get("performance_date"), connect_policy="all")
@@ -971,8 +987,9 @@ def annotate_pdf_bytes(
                     # Same-page: route around obstacles
                     s, e = _edge_to_edge_points(final_rect, r)
                     
-                    # Collect obstacles (all red boxes + all annotations)
-                    obstacles = quote_hits_by_page.get(0, []) + occupied_callouts
+                    # Collect obstacles (all red boxes + all OTHER annotations, not this one!)
+                    other_annotations = [ann for ann in occupied_callouts if ann != final_rect]
+                    obstacles = quote_hits_by_page.get(0, []) + other_annotations
                     
                     # Use smart routing
                     _draw_routed_line(page1, s, e, obstacles)
