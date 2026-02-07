@@ -14,5 +14,9 @@ newspaper3k>=0.2.8
 # WeasyPrint for PDF generation
 weasyprint>=60.0
 
-# HTML parsing for fallback SERP providers
+# HTML parsing
 html5lib>=1.1
+
+# Translation support
+googletrans==4.0.0rc1
+langdetect>=1.0.9
