@@ -24,8 +24,8 @@ NO_GO_RECT = fitz.Rect(
 )
 
 # ---- spacing knobs ----
-EDGE_PAD = 12.0
-GAP_FROM_TEXT_BLOCKS = 8.0
+EDGE_PAD = 18.0  # Increased from 12.0 to give more margin space
+GAP_FROM_TEXT_BLOCKS = 12.0  # Increased from 8.0 for better annotation spacing
 GAP_FROM_HIGHLIGHTS = 10.0
 GAP_BETWEEN_CALLOUTS = 8.0
 ENDPOINT_PULLBACK = 1.5
@@ -500,26 +500,53 @@ def _place_annotation_in_margin(
 # ============================================================
 
 def _edge_to_edge_points(r1: fitz.Rect, r2: fitz.Rect) -> Tuple[fitz.Point, fitz.Point]:
+    """
+    Determine optimal connection points between two rectangles.
+    Improved logic: prioritizes horizontal connections and cleaner angles.
+    """
     c1 = _center(r1)
     c2 = _center(r2)
 
     dx = c2.x - c1.x
     dy = c2.y - c1.y
 
-    if abs(dx) > abs(dy):
-        if dx > 0:
-            p1 = fitz.Point(r1.x1, c1.y)
-            p2 = fitz.Point(r2.x0, c2.y)
-        else:
-            p1 = fitz.Point(r1.x0, c1.y)
-            p2 = fitz.Point(r2.x1, c2.y)
+    # Prefer horizontal connections when annotations are in margins
+    # This creates cleaner L-shaped lines
+    
+    # Check if r1 is in left margin and r2 is in content area
+    page_center_x = 306  # Approximate center of typical page (612pt wide)
+    r1_in_left_margin = r1.x1 < page_center_x * 0.4
+    r1_in_right_margin = r1.x0 > page_center_x * 1.6
+    r2_in_content = page_center_x * 0.3 < c2.x < page_center_x * 1.7
+    
+    if r1_in_left_margin and r2_in_content:
+        # Annotation on left, target in content
+        # Connect from right edge of annotation to left edge of target
+        p1 = fitz.Point(r1.x1, c1.y)
+        p2 = fitz.Point(r2.x0, c2.y)
+    elif r1_in_right_margin and r2_in_content:
+        # Annotation on right, target in content  
+        # Connect from left edge of annotation to right edge of target
+        p1 = fitz.Point(r1.x0, c1.y)
+        p2 = fitz.Point(r2.x1, c2.y)
     else:
-        if dy > 0:
-            p1 = fitz.Point(c1.x, r1.y1)
-            p2 = fitz.Point(c2.x, r2.y0)
+        # Default behavior: use dominant direction
+        if abs(dx) > abs(dy):
+            # Horizontal dominant
+            if dx > 0:
+                p1 = fitz.Point(r1.x1, c1.y)
+                p2 = fitz.Point(r2.x0, c2.y)
+            else:
+                p1 = fitz.Point(r1.x0, c1.y)
+                p2 = fitz.Point(r2.x1, c2.y)
         else:
-            p1 = fitz.Point(c1.x, r1.y0)
-            p2 = fitz.Point(c2.x, r2.y1)
+            # Vertical dominant
+            if dy > 0:
+                p1 = fitz.Point(c1.x, r1.y1)
+                p2 = fitz.Point(c2.x, r2.y0)
+            else:
+                p1 = fitz.Point(c1.x, r1.y0)
+                p2 = fitz.Point(c2.x, r2.y1)
 
     return p1, p2
 
@@ -697,11 +724,11 @@ def annotate_pdf_bytes(
        - Maps to: meta["source_url"]
        - Appears for any URL/publication source
     
-    2. "Venue / distinguished organisation."
+    2. "Distinguished organization."
        - Maps to: meta["venue_name"]
        - Appears for performance venues
     
-    3. "Ensemble / performing organisation."
+    3. "Distinguished organization."
        - Maps to: meta["ensemble_name"]
        - Appears for performing groups
     
@@ -712,7 +739,7 @@ def annotate_pdf_bytes(
        - "Future performance date." if date is after current_date
        - "Performance date." if date cannot be parsed or is today
     
-    5. "Beneficiary lead role evidence."
+    5. "Beneficiary in lead role."
        - Maps to: meta["beneficiary_name"] + meta["beneficiary_variants"]
        - Appears for the person being evaluated
     
@@ -1051,18 +1078,22 @@ def annotate_pdf_bytes(
     
     _do_job("Original source of publication.", source_url, 
             connect_policy="all", also_try_variants=source_url_variants)
-    _do_job("Venue / distinguished organisation.", meta.get("venue_name"), connect_policy="all")
-    _do_job("Ensemble / performing organisation.", meta.get("ensemble_name"), connect_policy="all")
+    _do_job("Distinguished organization.", meta.get("venue_name"), connect_policy="all")
+    _do_job("Distinguished organization.", meta.get("ensemble_name"), connect_policy="all")
     
     # Performance date with smart past/future detection
+    # IMPORTANT: Pass current_date parameter to enable past/future detection
+    # Example: annotate_pdf_bytes(..., current_date=datetime.now())
     performance_date_str = meta.get("performance_date")
     if performance_date_str:
-        date_label = get_date_label(performance_date_str, current_date)
+        # If current_date is None, use datetime.now() by default
+        effective_current_date = current_date if current_date is not None else datetime.now()
+        date_label = get_date_label(performance_date_str, effective_current_date)
         _do_job(date_label, performance_date_str, connect_policy="all")
 
     # Beneficiary targets (still value-driven)
     _do_job(
-        "Beneficiary lead role evidence.",
+        "Beneficiary in lead role.",
         meta.get("beneficiary_name"),
         connect_policy="all",
         also_try_variants=meta.get("beneficiary_variants") or [],
