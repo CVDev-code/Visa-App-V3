@@ -13,6 +13,14 @@ import re
 from typing import Dict, List, Optional
 from openai import OpenAI
 
+# Import customizable search prompts
+try:
+    from .search_prompts import SEARCH_PROMPTS, SEARCH_SYSTEM_PROMPT
+except ImportError:
+    # Fallback if search_prompts.py not found
+    SEARCH_PROMPTS = None
+    SEARCH_SYSTEM_PROMPT = None
+
 
 # ============================================================
 # Configuration
@@ -76,7 +84,7 @@ def _search_with_chatgpt(
             messages=[
                 {
                     "role": "system",
-                    "content": """You are a USCIS immigration attorney researching O-1 visa evidence. 
+                    "content": SEARCH_SYSTEM_PROMPT if SEARCH_SYSTEM_PROMPT else """You are a USCIS immigration attorney researching O-1 visa evidence. 
 Search the web and return sources that meet USCIS standards for extraordinary ability.
 
 CRITICAL: Your response must include:
@@ -123,9 +131,20 @@ def _build_search_prompt(
 ) -> str:
     """
     Build criterion-specific search prompts.
-    These are similar to what you'd type into ChatGPT manually.
+    
+    Uses prompts from search_prompts.py if available,
+    otherwise falls back to built-in defaults.
     """
     
+    # Try to use external customizable prompts first
+    if SEARCH_PROMPTS and criterion_id in SEARCH_PROMPTS:
+        template = SEARCH_PROMPTS[criterion_id]
+        return template.format(
+            artist_name=artist_name,
+            target_count=target_count
+        )
+    
+    # Fallback to built-in prompts
     prompts = {
         "1": f"""Find {target_count} sources showing {artist_name} has won significant national or international awards or prizes.
 
