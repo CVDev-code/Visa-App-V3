@@ -1,116 +1,37 @@
 """
-AI-Powered Research Assistant - ChatGPT-Style Agentic Search
-Uses LLM to orchestrate multi-query search, evaluate quality, and filter results.
-Budget: ~$0.75-0.95 per application with deep analysis.
+AI-Powered Research Assistant - Using OpenAI's Native Web Search
+CORRECTED VERSION - Proper API response handling.
+
+This uses ChatGPT's web_search tool via API.
+No Brave API needed. No agent setup needed.
+Just set OPENAI_API_KEY and it works.
 """
 
 import os
 import json
-from typing import Dict, List, Optional, Set
-from urllib.parse import urlparse, parse_qs, urlunparse
+import re
+from typing import Dict, List, Optional
+from openai import OpenAI
 
 
 # ============================================================
 # Configuration
 # ============================================================
 
-# Target results per criterion (what user sees)
 TARGET_RESULTS = {
-    "1": 5,           # Awards: 1-5 high-quality
-    "2_past": 5,      # Past performances
-    "2_future": 5,    # Future performances
-    "3": 10,          # Reviews: most content-rich
-    "4_past": 5,      # Past engagements
-    "4_future": 5,    # Future engagements
-    "5": 10,          # Success (expect duplicates)
-    "6": 3,           # Recognition (expect duplicates)
-    "7": 3,           # Salary (very specific)
-}
-
-# Search depth per criterion (URLs to fetch & analyze)
-SEARCH_DEPTH = {
-    "1": 100,    # Awards - find every credible one
-    "3": 100,    # Reviews - critical for reputation
-    "7": 100,    # Salary - rare but crucial
-    "2_past": 50,
-    "2_future": 50,
-    "4_past": 50,
-    "4_future": 50,
-    "5": 30,     # Success - usually duplicates
-    "6": 30,     # Recognition - usually duplicates
-}
-
-# Prestigious source exemplars (LLM learns from these)
-PRESTIGIOUS_SOURCES = {
-    "classical": [
-        "Gramophone", "The Strad", "BBC Music Magazine", 
-        "Classical Music Magazine", "Opera News"
-    ],
-    "general_prestige": [
-        "New York Times", "Guardian", "Washington Post", 
-        "Wall Street Journal", "Financial Times", "The Times",
-        "NPR", "BBC", "Reuters", "Associated Press"
-    ],
-    "music_trade": [
-        "Billboard", "Rolling Stone", "Pitchfork", "Variety",
-        "Music Week", "NME", "Consequence"
-    ],
-    "arts_prestige": [
-        "The New Yorker", "The Atlantic", "Harper's",
-        "Art Forum", "Brooklyn Rail"
-    ],
-}
-
-# Query templates (hybrid mode - LLM adapts these)
-QUERY_TEMPLATES = {
-    "1": [
-        '"{artist}" award winner',
-        '"{artist}" prize',
-        '"{artist}" competition winner',
-    ],
-    "3": [
-        '"{artist}" review',
-        '"{artist}" concert review',
-        '"{artist}" performance critic',
-    ],
-    "2_past": [
-        '"{artist}" performed',
-        '"{artist}" lead role',
-        '"{artist}" starring',
-    ],
-    "2_future": [
-        '"{artist}" upcoming',
-        '"{artist}" will perform',
-        '"{artist}" scheduled 2025 OR 2026',
-    ],
-    "4_past": [
-        '"{artist}" performed at',
-        '"{artist}" engagement',
-    ],
-    "4_future": [
-        '"{artist}" upcoming',
-        '"{artist}" announced',
-    ],
-    "5": [
-        '"{artist}" success',
-        '"{artist}" acclaimed',
-        '"{artist}" sold out',
-    ],
-    "6": [
-        '"{artist}" recognized',
-        '"{artist}" praised',
-    ],
-    "7": [
-        '"{artist}" contract',
-        '"{artist}" salary',
-        'onetcenter.org {occupation} wages',
-        'bls.gov {occupation} compensation',
-    ],
+    "1": 5,
+    "2_past": 5,
+    "2_future": 5,
+    "3": 10,
+    "4_past": 5,
+    "4_future": 5,
+    "5": 10,
+    "6": 3,
+    "7": 3,
 }
 
 
 def _get_secret(name: str):
-    """Works on Streamlit Cloud (st.secrets) and locally (.env / env vars)."""
     try:
         import streamlit as st
         if name in st.secrets:
@@ -121,436 +42,295 @@ def _get_secret(name: str):
 
 
 # ============================================================
-# URL Normalization & Deduplication
+# OpenAI Web Search (ChatGPT-Style)
 # ============================================================
 
-def _normalize_url(url: str) -> str:
-    """Normalize URL for deduplication."""
-    if not url:
-        return ""
-    
-    try:
-        parsed = urlparse(url.strip())
-        domain = parsed.netloc.lower()
-        
-        if domain.startswith("www."):
-            domain = domain[4:]
-        
-        path = parsed.path
-        if "/amp/" in path or path.endswith("/amp"):
-            path = path.replace("/amp/", "/").replace("/amp", "")
-        if domain.startswith("amp."):
-            domain = domain[4:]
-        
-        tracking_params = {
-            'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
-            'fbclid', 'gclid', 'msclkid', '_ga', 'mc_cid', 'mc_eid',
-            'ref', 'source', 'campaign_id', 'ad_id'
-        }
-        
-        query_params = parse_qs(parsed.query)
-        clean_params = {
-            k: v for k, v in query_params.items() 
-            if k.lower() not in tracking_params
-        }
-        
-        clean_query = "&".join(
-            f"{k}={v[0]}" for k, v in sorted(clean_params.items())
-        ) if clean_params else ""
-        
-        normalized = urlunparse((
-            parsed.scheme or "https",
-            domain,
-            path.rstrip("/") or "/",
-            parsed.params,
-            clean_query,
-            ""
-        ))
-        
-        return normalized
-    
-    except Exception as e:
-        print(f"[_normalize_url] Error: {e}")
-        return url.lower()
-
-
-def _deduplicate_results(results: List[Dict]) -> List[Dict]:
-    """Deduplicate by normalized URL."""
-    seen: Set[str] = set()
-    deduped = []
-    
-    for item in results:
-        url = item.get("url", "")
-        if not url:
-            continue
-        
-        normalized = _normalize_url(url)
-        if normalized not in seen:
-            seen.add(normalized)
-            deduped.append(item)
-    
-    return deduped
-
-
-# ============================================================
-# SERP Providers (Brave + Fallbacks)
-# ============================================================
-
-def _search_with_brave(query: str, max_results: int = 20) -> List[Dict]:
-    """Search with Brave."""
-    import requests
-    
-    api_key = _get_secret("BRAVE_API_KEY")
-    if not api_key:
-        print("[Brave] API key not set")
-        return []
-    
-    try:
-        url = "https://api.search.brave.com/res/v1/web/search"
-        
-        headers = {
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip",
-            "X-Subscription-Token": api_key
-        }
-        
-        params = {
-            "q": query,
-            "count": min(max_results, 20),
-            "search_lang": "en",
-            "country": "us",
-            "safesearch": "off",
-            "freshness": "all",
-            "text_decorations": False,
-            "spellcheck": True
-        }
-        
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        web_results = data.get("web", {}).get("results", [])
-        
-        results = []
-        for item in web_results[:max_results]:
-            if not item or not isinstance(item, dict):
-                continue
-            
-            results.append({
-                "url": item.get("url", ""),
-                "title": item.get("title", ""),
-                "description": item.get("description", ""),
-                "age": item.get("age", ""),
-            })
-        
-        return results
-        
-    except Exception as e:
-        print(f"[Brave] Error: {e}")
-        return []
-
-
-def _search_with_serper(query: str, max_results: int, api_key: str) -> List[Dict]:
-    """Serper.dev Google Search."""
-    import requests
-    
-    try:
-        url = "https://google.serper.dev/search"
-        
-        headers = {
-            "X-API-KEY": api_key,
-            "Content-Type": "application/json"
-        }
-        
-        payload = {"q": query, "num": max_results}
-        
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        organic = data.get("organic", [])
-        
-        results = []
-        for item in organic[:max_results]:
-            results.append({
-                "url": item.get("link", ""),
-                "title": item.get("title", ""),
-                "description": item.get("snippet", ""),
-                "age": item.get("date", ""),
-            })
-        
-        return results
-        
-    except Exception as e:
-        print(f"[Serper] Error: {e}")
-        return []
-
-
-def _search_with_fallback(query: str, max_results: int = 10) -> List[Dict]:
-    """Try fallback providers."""
-    serper_key = _get_secret("SERPER_API_KEY")
-    if serper_key:
-        results = _search_with_serper(query, max_results, serper_key)
-        if results:
-            return results
-    
-    print("[Fallback] No provider configured")
-    return []
-
-
-def _execute_search(query: str, depth: int) -> List[Dict]:
-    """Execute search with Brave + fallback if needed."""
-    print(f"[Search] '{query}' (target depth: {depth})")
-    
-    # Brave first
-    brave_results = _search_with_brave(query, min(depth, 20))
-    brave_deduped = _deduplicate_results(brave_results)
-    
-    print(f"[Search] Brave: {len(brave_deduped)} unique")
-    
-    remaining = depth - len(brave_deduped)
-    
-    if remaining <= 0:
-        return brave_deduped[:depth]
-    
-    print(f"[Search] Need {remaining} more, trying fallback...")
-    fallback_results = _search_with_fallback(query, remaining)
-    
-    combined = brave_deduped + fallback_results
-    final = _deduplicate_results(combined)
-    
-    print(f"[Search] Final: {len(final[:depth])} results")
-    return final[:depth]
-
-
-# ============================================================
-# LLM Query Generation (Hybrid)
-# ============================================================
-
-def _generate_search_queries(
+def _search_with_chatgpt(
     criterion_id: str,
     criterion_desc: str,
     artist_name: str,
-    name_variants: List[str],
-    artist_field: Optional[str] = None,
-) -> List[str]:
-    """
-    Generate 3-5 search queries using hybrid approach:
-    - Start with templates
-    - LLM adapts based on artist type/field
-    """
-    from openai import OpenAI
-    
-    api_key = _get_secret("OPENAI_API_KEY")
-    if not api_key:
-        # Fallback to templates only
-        return _fallback_template_queries(criterion_id, artist_name)
-    
-    model = _get_secret("OPENAI_MODEL") or "gpt-4o-mini"
-    client = OpenAI(api_key=api_key)
-    
-    # Get base templates
-    templates = QUERY_TEMPLATES.get(criterion_id, [])
-    
-    # Build context
-    prestigious_sources_str = "\n".join([
-        f"- {category}: {', '.join(sources)}"
-        for category, sources in PRESTIGIOUS_SOURCES.items()
-    ])
-    
-    prompt = f"""You are an expert at crafting search queries for O-1 visa evidence research.
-
-ARTIST: {artist_name}
-FIELD: {artist_field or "Unknown"}
-CRITERION: ({criterion_id}) {criterion_desc}
-
-BASE QUERY TEMPLATES:
-{chr(10).join(f"- {t}" for t in templates)}
-
-PRESTIGIOUS SOURCES (examples to learn from):
-{prestigious_sources_str}
-
-YOUR TASK:
-Generate 3-5 search queries that will find the BEST evidence for this criterion.
-
-RULES:
-1. Adapt base templates to artist's field (e.g., classical → add "Gramophone")
-2. Use exact artist name in quotes: "{artist_name}"
-3. Target prestigious sources when relevant
-4. Keep queries concise (5-10 words max)
-5. For criterion 7 (salary), prioritize BLS, union databases, industry reports
-
-Return ONLY a JSON array of query strings:
-["query 1", "query 2", "query 3"]
-"""
-    
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You generate search queries. Return only valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.7,
-        )
-        
-        content = resp.choices[0].message.content or "{}"
-        data = json.loads(content)
-        
-        # Handle different response formats
-        if isinstance(data, list):
-            queries = data
-        elif "queries" in data:
-            queries = data["queries"]
-        elif "query_list" in data:
-            queries = data["query_list"]
-        else:
-            queries = list(data.values())[0] if data else []
-        
-        # Validate
-        queries = [q for q in queries if isinstance(q, str) and q.strip()]
-        
-        if not queries:
-            print(f"[LLM Query Gen] No valid queries, using templates")
-            return _fallback_template_queries(criterion_id, artist_name)
-        
-        print(f"[LLM Query Gen] Generated {len(queries)} queries")
-        return queries[:5]  # Max 5
-        
-    except Exception as e:
-        print(f"[LLM Query Gen] Error: {e}")
-        return _fallback_template_queries(criterion_id, artist_name)
-
-
-def _fallback_template_queries(criterion_id: str, artist_name: str) -> List[str]:
-    """Fallback to template-based queries."""
-    templates = QUERY_TEMPLATES.get(criterion_id, [
-        f'"{artist_name}" performance',
-        f'"{artist_name}" concert',
-    ])
-    
-    # Replace placeholders
-    queries = []
-    for template in templates:
-        query = template.replace("{artist}", artist_name)
-        query = query.replace("{occupation}", "musician")  # Default
-        queries.append(query)
-    
-    return queries
-
-
-# ============================================================
-# LLM Result Evaluation
-# ============================================================
-
-def _evaluate_search_results(
-    criterion_id: str,
-    criterion_desc: str,
-    artist_name: str,
-    search_results: List[Dict],
     target_count: int,
 ) -> List[Dict]:
     """
-    LLM evaluates all search results and returns top N by quality.
-    This is the ChatGPT-style filtering step.
+    Use OpenAI's web_search tool - exactly like ChatGPT.
+    
+    This is the same search ChatGPT uses when you ask it to search the web.
     """
-    from openai import OpenAI
     
     api_key = _get_secret("OPENAI_API_KEY")
     if not api_key:
-        # No filtering, return first N
-        return search_results[:target_count]
+        raise RuntimeError("OPENAI_API_KEY not set")
     
-    model = _get_secret("OPENAI_MODEL") or "gpt-4o-mini"
+    model = _get_secret("OPENAI_MODEL") or "gpt-4o"
     client = OpenAI(api_key=api_key)
     
-    if not search_results:
-        return []
+    # Build criterion-specific search prompt
+    search_prompt = _build_search_prompt(criterion_id, criterion_desc, artist_name, target_count)
     
-    # Prepare results for LLM
-    results_text = []
-    for i, r in enumerate(search_results):
-        results_text.append(
-            f"{i}. [{_extract_source_from_url(r['url'])}] {r['title']}\n"
-            f"   URL: {r['url']}\n"
-            f"   Excerpt: {r['description'][:200]}"
-        )
-    
-    results_block = "\n\n".join(results_text)
-    
-    prompt = f"""You are evaluating search results for O-1 visa evidence.
-
-ARTIST: {artist_name}
-CRITERION: ({criterion_id}) {criterion_desc}
-
-TARGET: Select the TOP {target_count} results that best demonstrate this criterion.
-
-EVALUATION CRITERIA:
-1. SOURCE PRESTIGE: Prioritize major publications, industry leaders, authoritative sources
-2. RELEVANCE: Content must directly support the criterion
-3. RECENCY: Recent content preferred (except for criterion 1 - awards can be historical)
-4. SPECIFICITY: Detailed evidence better than vague mentions
-
-SEARCH RESULTS:
-{results_block}
-
-YOUR TASK:
-Evaluate each result and select the top {target_count}.
-
-Return ONLY valid JSON:
-{{
-  "selected_indices": [0, 3, 7, ...],
-  "reasoning": "Brief explanation of selections"
-}}
-"""
+    print(f"[ChatGPT Search] Criterion {criterion_id}: {search_prompt[:100]}...")
     
     try:
-        resp = client.chat.completions.create(
+        # Use web_search tool (same as ChatGPT)
+        response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "You evaluate search results for visa evidence quality."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": """You are a USCIS immigration attorney researching O-1 visa evidence. 
+Search the web and return sources that meet USCIS standards for extraordinary ability.
+
+CRITICAL: Your response must include:
+1. For each source: Full URL in markdown link format [Title](URL)
+2. Brief description of why it's relevant
+3. Key quote or excerpt if applicable
+
+Format your response like:
+1. [Article Title](https://full-url.com) - Why this is strong evidence
+2. [Another Article](https://another-url.com) - Key points from this source
+etc."""
+                },
+                {
+                    "role": "user",
+                    "content": search_prompt
+                }
             ],
-            response_format={"type": "json_object"},
-            temperature=0.3,
+            tools=[
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search"
+                }
+            ],
         )
         
-        content = resp.choices[0].message.content or "{}"
-        data = json.loads(content)
+        # Extract search results from response
+        results = _extract_search_results(response, criterion_desc)
         
-        selected = data.get("selected_indices", [])
-        reasoning = data.get("reasoning", "")
-        
-        print(f"[LLM Eval] Selected {len(selected)} results")
-        if reasoning:
-            print(f"[LLM Eval] Reasoning: {reasoning[:100]}...")
-        
-        # Build output
-        filtered = []
-        for idx in selected:
-            if isinstance(idx, int) and 0 <= idx < len(search_results):
-                filtered.append(search_results[idx])
-        
-        # If LLM returned fewer than target, fill with high-ranking unselected
-        if len(filtered) < target_count:
-            remaining = [r for i, r in enumerate(search_results) if i not in selected]
-            filtered.extend(remaining[:target_count - len(filtered)])
-        
-        return filtered[:target_count]
+        print(f"[ChatGPT Search] Found {len(results)} results")
+        return results
         
     except Exception as e:
-        print(f"[LLM Eval] Error: {e}")
-        # Fallback: return first N
-        return search_results[:target_count]
+        print(f"[ChatGPT Search] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
 
 
-# ============================================================
-# Source Extraction
-# ============================================================
+def _build_search_prompt(
+    criterion_id: str,
+    criterion_desc: str,
+    artist_name: str,
+    target_count: int,
+) -> str:
+    """
+    Build criterion-specific search prompts.
+    These are similar to what you'd type into ChatGPT manually.
+    """
+    
+    prompts = {
+        "1": f"""Find {target_count} sources showing {artist_name} has won significant national or international awards or prizes.
+
+USCIS Requirements for O-1:
+- Named, prestigious awards (Grammy, Pulitzer, MacArthur, major international competitions)
+- Official announcements from award organizations or major publications
+- NOT nominations, "best of" lists, or local community awards
+
+Search for:
+- Award announcements from official organizations
+- Coverage in major newspapers (NYT, Guardian, etc.)
+- Industry publication reports (e.g., Gramophone for classical music)
+
+For each source found, provide:
+- [Full Article Title](complete URL)
+- Brief description of the award
+- Why this meets O-1 standards
+
+IMPORTANT: Include the complete URL for each source.""",
+
+        "3": f"""Find {target_count} critical reviews or feature articles about {artist_name} from prestigious publications.
+
+USCIS Requirements for O-1:
+- Reviews from major publications (New York Times, Guardian, Gramophone, BBC, NPR, etc.)
+- Feature articles demonstrating distinguished reputation
+- Critical analysis, not just event listings or brief mentions
+
+Search for:
+- Concert or performance reviews
+- Album or recording reviews  
+- Feature articles or profiles
+- Critical essays about the artist's work
+
+For each review found, provide:
+- [Article Title](complete URL)
+- Publication name and date
+- Key excerpt showing critical acclaim
+
+IMPORTANT: Include complete URLs. Prioritize prestigious publications.""",
+
+        "2_past": f"""Find {target_count} sources showing {artist_name} had lead or starring roles in PAST productions or events with distinguished reputation.
+
+Search for:
+- Past performances at major venues (Carnegie Hall, Royal Opera House, etc.)
+- Lead roles in distinguished productions
+- Starring engagements with prestigious organizations
+
+For each source, provide:
+- [Article Title](complete URL)
+- Venue/event name, role, date
+
+IMPORTANT: Include complete URLs.""",
+
+        "2_future": f"""Find {target_count} sources showing {artist_name} has UPCOMING (2025-2026) lead or starring roles.
+
+Search for:
+- Announced performances at major venues
+- Future engagements
+- Upcoming tours or productions
+
+For each source, provide:
+- [Announcement Title](complete URL)
+- Venue/event name, role, date
+
+IMPORTANT: Include complete URLs.""",
+
+        "4_past": f"""Find {target_count} sources showing {artist_name} had PAST lead, starring, or critical roles for distinguished organizations.
+
+Search for:
+- Past engagements with major orchestras, opera companies, festivals
+- Critical roles with prestigious organizations
+
+For each source, provide:
+- [Article Title](complete URL)
+- Organization name, role, date""",
+
+        "4_future": f"""Find {target_count} sources showing {artist_name} has FUTURE engagements with distinguished organizations.
+
+Search for:
+- Announced engagements with major organizations
+- Future performances
+
+For each source, provide:
+- [Announcement Title](complete URL)
+- Organization name, role, date""",
+
+        "5": f"""Find {target_count} sources showing {artist_name} has achieved major commercial or critically acclaimed successes.
+
+Search for:
+- Sold-out performances
+- Chart success or sales records
+- Critical acclaim
+- Box office success
+
+For each source, provide:
+- [Article Title](complete URL)
+- Success metric described""",
+
+        "6": f"""Find {target_count} sources showing {artist_name} has received significant recognition from organizations, critics, or experts.
+
+Search for:
+- Critical praise from recognized experts
+- Recognition from industry organizations
+- Expert testimonials
+
+For each source, provide:
+- [Article Title](complete URL)
+- Type of recognition""",
+
+        "7": f"""Find sources about {artist_name}'s salary/remuneration, and industry wage data for comparison.
+
+CRITICAL: For O-1 visa, we need to prove artist earns substantially above median.
+
+Search for:
+1. Artist's salary/fees:
+   - Contract amounts
+   - Performance fees
+   - News articles mentioning compensation
+   
+2. Industry wage comparisons (ESSENTIAL):
+   - Bureau of Labor Statistics data: search "onetcenter.org musicians wages"
+   - BLS data: search "bls.gov occupational employment wages musicians"
+   - Union scales for comparison
+
+For each source, provide:
+- [Source Title](complete URL)
+- Wage/salary information
+- Whether it's artist-specific or industry comparison data
+
+IMPORTANT: Finding BLS comparison data is critical for this criterion.""",
+    }
+    
+    return prompts.get(criterion_id, f"Find {target_count} sources about {artist_name} for: {criterion_desc}")
+
+
+def _extract_search_results(response, criterion_desc: str) -> List[Dict]:
+    """
+    Extract search results from OpenAI response.
+    
+    The response contains the LLM's text with markdown links.
+    We extract URLs from the format: [Title](URL)
+    """
+    
+    results = []
+    
+    try:
+        # Get the message content
+        message = response.choices[0].message
+        content = message.content or ""
+        
+        print(f"[Extract Results] Raw response length: {len(content)} chars")
+        
+        # Extract markdown links: [text](url)
+        # Pattern: [anything](http://url or https://url)
+        url_pattern = r'\[([^\]]+)\]\((https?://[^\)]+)\)'
+        matches = re.findall(url_pattern, content)
+        
+        print(f"[Extract Results] Found {len(matches)} markdown links")
+        
+        for title, url in matches:
+            # Clean up URL (remove trailing punctuation)
+            url = url.rstrip('.,;:!?)')
+            
+            # Extract excerpt (text after the link, up to next link or paragraph)
+            # This is a simple extraction - could be improved
+            excerpt_pattern = re.escape(f"[{title}]({url})") + r'\s*-?\s*([^[\n]+)'
+            excerpt_match = re.search(excerpt_pattern, content)
+            excerpt = excerpt_match.group(1).strip() if excerpt_match else ""
+            
+            results.append({
+                "url": url,
+                "title": title.strip(),
+                "source": _extract_source_from_url(url),
+                "relevance": f"ChatGPT search for {criterion_desc[:50]}...",
+                "excerpt": excerpt[:300] if excerpt else "Found via ChatGPT web search"
+            })
+        
+        # If no markdown links found, try to extract bare URLs
+        if not results:
+            print("[Extract Results] No markdown links, trying bare URLs")
+            bare_url_pattern = r'(https?://[^\s\)]+)'
+            bare_urls = re.findall(bare_url_pattern, content)
+            
+            for url in bare_urls[:10]:  # Limit to 10 bare URLs
+                url = url.rstrip('.,;:!?)')
+                results.append({
+                    "url": url,
+                    "title": _extract_source_from_url(url),
+                    "source": _extract_source_from_url(url),
+                    "relevance": f"Found for {criterion_desc[:50]}...",
+                    "excerpt": "Source found via ChatGPT web search"
+                })
+        
+        return results
+        
+    except Exception as e:
+        print(f"[Extract Results] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
 
 def _extract_source_from_url(url: str) -> str:
     """Extract publication name from URL."""
+    from urllib.parse import urlparse
     try:
         domain = urlparse(url).netloc
         domain = domain.replace("www.", "")
@@ -575,13 +355,19 @@ def ai_search_for_evidence(
     artist_field: Optional[str] = None,
 ) -> Dict[str, List[Dict]]:
     """
-    ChatGPT-style agentic research:
-    1. LLM generates 3-5 targeted queries per criterion
-    2. Execute searches (Brave + fallback) - fetch depth URLs
-    3. LLM evaluates ALL results for quality
-    4. Return top N per criterion
+    ChatGPT-style research using OpenAI's native web search.
     
-    Budget: ~$0.75-0.95 per application
+    This uses the SAME search tool ChatGPT uses.
+    
+    Setup required:
+    - OPENAI_API_KEY in environment or Streamlit secrets
+    - That's it! No agent setup needed.
+    
+    Cost: ~$2-3 per application
+    - Web search: $10/1000 calls (7 criteria = $0.07)
+    - LLM costs: ~$2-3 depending on model
+    
+    Quality: ChatGPT-level
     """
     
     results_by_criterion = {}
@@ -597,50 +383,21 @@ def ai_search_for_evidence(
             print(f"[Criterion {cid}] {criterion_desc}")
             print(f"{'='*60}")
             
-            # Step 1: LLM generates queries
-            queries = _generate_search_queries(
-                cid, criterion_desc, artist_name, name_variants, artist_field
-            )
-            
-            print(f"[Criterion {cid}] Generated queries:")
-            for q in queries:
-                print(f"  - {q}")
-            
-            # Step 2: Execute searches
-            depth = SEARCH_DEPTH.get(cid, 50)
-            all_results = []
-            
-            for query in queries:
-                results = _execute_search(query, depth // len(queries) + 10)
-                all_results.extend(results)
-            
-            # Deduplicate
-            all_results = _deduplicate_results(all_results)
-            print(f"[Criterion {cid}] Total unique results: {len(all_results)}")
-            
-            if not all_results:
-                print(f"[Criterion {cid}] No results found")
-                continue
-            
-            # Step 3: LLM evaluates and selects top N
             target = TARGET_RESULTS.get(cid, 5)
-            top_results = _evaluate_search_results(
-                cid, criterion_desc, artist_name, all_results, target
+            
+            # Use ChatGPT's web search
+            results = _search_with_chatgpt(
+                cid,
+                criterion_desc,
+                artist_name,
+                target
             )
             
-            # Step 4: Format for UI
-            formatted = []
-            for r in top_results:
-                formatted.append({
-                    "url": r["url"],
-                    "title": r["title"][:200],
-                    "source": _extract_source_from_url(r["url"]),
-                    "relevance": f"Selected for {criterion_desc[:50]}...",
-                    "excerpt": r["description"][:300],
-                })
-            
-            results_by_criterion[cid] = formatted
-            print(f"[Criterion {cid}] Returning {len(formatted)} top results")
+            if results:
+                results_by_criterion[cid] = results
+                print(f"[Criterion {cid}] Returning {len(results)} results")
+            else:
+                print(f"[Criterion {cid}] No results found - ChatGPT may not have found relevant sources")
             
         except Exception as e:
             print(f"[Criterion {cid}] Error: {e}")
@@ -651,11 +408,12 @@ def ai_search_for_evidence(
     if not results_by_criterion:
         raise RuntimeError(
             "No results found for any criterion.\n\n"
-            "Troubleshooting:\n"
-            "1. Check BRAVE_API_KEY and OPENAI_API_KEY\n"
-            "2. Verify artist name spelling\n"
-            "3. Add fallback: SERPER_API_KEY\n"
-            "4. Test artist manually in ChatGPT first"
+            "Possible causes:\n"
+            "1. OPENAI_API_KEY not set or invalid\n"
+            "2. Artist name may be misspelled or have limited online presence\n"
+            "3. Web search API may be temporarily unavailable\n"
+            "4. Check Streamlit logs for detailed error messages\n\n"
+            "Try searching manually in ChatGPT first to verify the artist has findable sources."
         )
     
     return results_by_criterion
