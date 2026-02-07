@@ -1,6 +1,13 @@
 """
-AI-Powered Research Assistant - Using Gemini (Free Tier - WORKING)
-Uses the stable google-generativeai library that works with free API keys.
+AI-Powered Research Assistant - Using Vertex AI Gemini with Google Search
+This works with PAID Google Cloud accounts with Vertex AI enabled.
+
+Setup Required:
+1. Create Google Cloud project: https://console.cloud.google.com
+2. Enable Vertex AI API
+3. Set up billing
+4. Create service account and download JSON key
+5. Set GOOGLE_APPLICATION_CREDENTIALS environment variable
 """
 
 import os
@@ -39,65 +46,94 @@ def _get_secret(name: str):
     return os.getenv(name)
 
 
-def _search_with_gemini(
+def _search_with_vertex_ai(
     criterion_id: str,
     criterion_desc: str,
     artist_name: str,
     target_count: int,
 ) -> List[Dict]:
     """
-    Use Gemini to suggest sources (works with free API key).
+    Use Vertex AI Gemini with Google Search grounding.
+    This is the PAID version that actually works.
     """
     
     try:
-        import google.generativeai as genai
+        import vertexai
+        from vertexai.generative_models import GenerativeModel, Tool
+        from vertexai.preview.generative_models import grounding
     except ImportError:
         raise RuntimeError(
-            "Google Generative AI library not installed.\n"
-            "Install with: pip install google-generativeai"
+            "Vertex AI library not installed.\n"
+            "Install with: pip install google-cloud-aiplatform"
         )
     
-    # Get API key
-    api_key = _get_secret("GEMINI_API_KEY")
-    if not api_key:
+    # Get configuration
+    project_id = _get_secret("GOOGLE_CLOUD_PROJECT")
+    location = _get_secret("GOOGLE_CLOUD_LOCATION") or "us-central1"
+    
+    if not project_id:
         raise RuntimeError(
-            "GEMINI_API_KEY not found.\n"
-            "Get one at: https://aistudio.google.com/app/apikey\n"
-            "Add to Streamlit secrets or environment variables."
+            "GOOGLE_CLOUD_PROJECT not found.\n"
+            "Add your Google Cloud project ID to Streamlit secrets."
         )
     
-    # Configure Gemini
-    genai.configure(api_key=api_key)
+    # Initialize Vertex AI
+    try:
+        vertexai.init(project=project_id, location=location)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to initialize Vertex AI: {e}\n\n"
+            "Make sure:\n"
+            "1. Vertex AI API is enabled in your Google Cloud project\n"
+            "2. Service account credentials are configured\n"
+            "3. GOOGLE_APPLICATION_CREDENTIALS is set (or use Streamlit secrets)"
+        )
     
     # Build search prompt
     search_prompt = _build_search_prompt(criterion_id, criterion_desc, artist_name, target_count)
     
     print(f"\n{'='*60}")
-    print(f"[Gemini] Criterion {criterion_id}: {criterion_desc[:50]}...")
+    print(f"[Vertex AI] Criterion {criterion_id}: {criterion_desc[:50]}...")
     print(f"{'='*60}")
     
     try:
-        print("[Gemini] Generating source suggestions...")
+        print("[Vertex AI] Searching with Google Search grounding...")
         
-        # Use free tier model
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Create model with Google Search grounding
+        model = GenerativeModel("gemini-1.5-flash-002")
         
-        response = model.generate_content(search_prompt)
+        # Configure Google Search as grounding source
+        google_search_tool = Tool.from_google_search_retrieval(
+            grounding.GoogleSearchRetrieval()
+        )
+        
+        # Generate content with grounding
+        response = model.generate_content(
+            search_prompt,
+            tools=[google_search_tool],
+        )
         
         # Extract text
         text = response.text
         
-        print(f"[Gemini] Response length: {len(text)} chars")
+        print(f"[Vertex AI] Response length: {len(text)} chars")
+        
+        # Extract grounding metadata if available
+        grounding_metadata = None
+        if hasattr(response, 'candidates') and response.candidates:
+            candidate = response.candidates[0]
+            if hasattr(candidate, 'grounding_metadata'):
+                grounding_metadata = candidate.grounding_metadata
         
         # Extract URLs from response
-        results = _extract_search_results(text, criterion_desc)
+        results = _extract_search_results(text, criterion_desc, grounding_metadata)
         
-        print(f"[Gemini] Found {len(results)} results")
+        print(f"[Vertex AI] Found {len(results)} results")
         
         return results
         
     except Exception as e:
-        print(f"[Gemini] Error: {e}")
+        print(f"[Vertex AI] Error: {e}")
         import traceback
         traceback.print_exc()
         return []
@@ -110,7 +146,7 @@ def _build_search_prompt(
     target_count: int,
 ) -> str:
     """
-    Build criterion-specific search prompts for Gemini.
+    Build criterion-specific search prompts.
     """
     
     # Try external prompts first
@@ -124,143 +160,162 @@ def _build_search_prompt(
         # Fallback to built-in prompts
         base_prompt = _get_default_prompt(criterion_id, criterion_desc, artist_name, target_count)
     
-    # Add Gemini-specific instructions
-    gemini_instructions = f"""
+    # Add grounding-specific instructions
+    grounding_instructions = f"""
 
-CRITICAL INSTRUCTIONS:
-Based on your knowledge of {artist_name}, suggest {target_count} likely sources where evidence for this criterion would be found.
+CRITICAL: Use Google Search to find {target_count} actual sources.
 
-For each source, provide:
-1. A likely article title or description
-2. A realistic URL where such content would be published
-3. The publication name
-4. Why this source would be relevant
+For each source you find, provide:
+1. Full article title
+2. Complete URL
+3. Publication name
+4. Brief excerpt showing relevance
 
-FORMAT EXACTLY LIKE THIS (use this exact structure):
+FORMAT:
 ---
-TITLE: Grammy Award Winner {artist_name} Announced
-URL: https://www.grammy.com/news/{artist_name.lower().replace(' ', '-')}-wins-award
-SOURCE: Grammy.com
-EXCERPT: {artist_name} received the Grammy Award for Best Performance
----
-
-TITLE: {artist_name} Review - New York Times
-URL: https://www.nytimes.com/music/reviews/{artist_name.lower().replace(' ', '-')}-concert-review
-SOURCE: New York Times
-EXCERPT: Critic praises {artist_name}'s virtuoso performance
+TITLE: [Exact article title from the source]
+URL: [Complete URL]
+SOURCE: [Publication name]
+EXCERPT: [Key quote from the article]
 ---
 
-YOU MUST:
-- Provide EXACTLY {target_count} sources in this format
-- Use realistic publication names (NYT, Guardian, Gramophone, NPR, BBC, etc.)
-- Create plausible URLs based on how that publication structures URLs
-- Make titles and excerpts relevant to the criterion
-- Use the --- separators between each source
-
-DO NOT:
-- Make up fake sources that wouldn't exist
-- Use URLs from suspicious or unreliable sources
-- Provide fewer than {target_count} sources
-- Break the formatting structure"""
+Find EXACTLY {target_count} real sources using Google Search."""
     
-    return base_prompt + gemini_instructions
+    return base_prompt + grounding_instructions
 
 
 def _get_default_prompt(criterion_id: str, criterion_desc: str, artist_name: str, target_count: int) -> str:
     """Default search prompts."""
     
     prompts = {
-        "1": f"""Based on your knowledge, suggest {target_count} likely sources showing awards won by {artist_name}.
+        "1": f"""Search Google for evidence that {artist_name} has won significant national or international awards.
 
-Focus on:
-- Major music awards (Grammy, classical competitions, international prizes)
-- Official award announcements
-- Major publication coverage of awards""",
+USCIS O-1 Requirements:
+- Named, prestigious awards (Grammy, Pulitzer, MacArthur, major competitions)
+- Official announcements from award organizations
+- Coverage in major publications
 
-        "3": f"""Based on your knowledge, suggest {target_count} likely reviews of {artist_name}.
+Find {target_count} sources showing award wins.""",
 
-Focus on:
-- Major publications (NYT, Guardian, Gramophone, BBC, NPR)
-- Concert/performance reviews
-- Album/recording reviews
-- Feature articles""",
+        "3": f"""Search Google for critical reviews and feature articles about {artist_name}.
 
-        "2_past": f"""Based on your knowledge, suggest {target_count} likely sources about {artist_name}'s past performances.
+USCIS O-1 Requirements:
+- Reviews from prestigious publications (NYT, Guardian, Gramophone, BBC, NPR)
+- Feature articles demonstrating distinguished reputation
+- Critical analysis, not just event listings
 
-Focus on:
-- Major venues (Carnegie Hall, Royal Opera House, etc.)
-- Lead roles
-- Distinguished productions""",
+Find {target_count} reviews from major publications.""",
 
-        "2_future": f"""Based on your knowledge, suggest {target_count} likely sources about {artist_name}'s upcoming (2025-2026) performances.
+        "2_past": f"""Search Google for {artist_name}'s PAST lead or starring roles in productions/events.
 
-Focus on:
+Look for:
+- Past performances at major venues (Carnegie Hall, Royal Opera House, etc.)
+- Lead roles in distinguished productions
+
+Find {target_count} sources about past performances.""",
+
+        "2_future": f"""Search Google for {artist_name}'s UPCOMING (2025-2026) lead or starring roles.
+
+Look for:
 - Announced performances at major venues
-- Future tours
-- Scheduled engagements""",
+- Future engagements
 
-        "4_past": f"""Based on your knowledge, suggest {target_count} likely sources about {artist_name}'s past roles with distinguished organizations.
+Find {target_count} sources about future performances.""",
 
-Focus on:
-- Major orchestras, opera companies, festivals
-- Critical roles with prestigious organizations""",
+        "4_past": f"""Search Google for {artist_name}'s PAST roles with distinguished organizations.
 
-        "4_future": f"""Based on your knowledge, suggest {target_count} likely sources about {artist_name}'s future engagements with distinguished organizations.
+Look for:
+- Past engagements with major orchestras, opera companies, festivals
+- Critical roles with prestigious organizations
 
-Focus on:
-- Announced engagements
-- Future performances with prestigious ensembles""",
+Find {target_count} sources.""",
 
-        "5": f"""Based on your knowledge, suggest {target_count} likely sources about {artist_name}'s commercial or critical successes.
+        "4_future": f"""Search Google for {artist_name}'s FUTURE engagements with distinguished organizations.
 
-Focus on:
+Look for:
+- Announced engagements with major organizations
+- Future performances
+
+Find {target_count} sources.""",
+
+        "5": f"""Search Google for {artist_name}'s major commercial or critically acclaimed successes.
+
+Look for:
 - Sold-out performances
 - Chart success or sales records
-- Critical acclaim""",
+- Critical acclaim
 
-        "6": f"""Based on your knowledge, suggest {target_count} likely sources about recognition {artist_name} has received.
+Find {target_count} sources.""",
 
-Focus on:
-- Critical praise from experts
+        "6": f"""Search Google for {artist_name} receiving significant recognition.
+
+Look for:
+- Critical praise from recognized experts
 - Recognition from industry organizations
-- Expert testimonials""",
+- Expert testimonials
 
-        "7": f"""Based on your knowledge, suggest {target_count} likely sources about {artist_name}'s salary and industry wage data.
+Find {target_count} sources.""",
 
-Focus on:
-- BLS data (onetcenter.org, bls.gov)
-- Union scales
-- Industry salary surveys""",
+        "7": f"""Search Google for {artist_name}'s salary/remuneration and industry wage data.
+
+CRITICAL: Need both artist salary AND industry comparison.
+
+Search for:
+1. Artist's salary/fees (if available)
+2. Bureau of Labor Statistics: "onetcenter.org musicians wages"
+3. BLS data: "bls.gov occupational employment musicians"
+4. Union scales for comparison
+
+Find {target_count} sources including BLS data.""",
     }
     
-    return prompts.get(criterion_id, f"Suggest {target_count} sources about {artist_name} for: {criterion_desc}")
+    return prompts.get(criterion_id, f"Search for {target_count} sources about {artist_name} for: {criterion_desc}")
 
 
-def _extract_search_results(text: str, criterion_desc: str) -> List[Dict]:
+def _extract_search_results(text: str, criterion_desc: str, grounding_metadata=None) -> List[Dict]:
     """
-    Extract URLs and metadata from Gemini's response.
+    Extract URLs and metadata from Vertex AI response.
     """
     
     results = []
     
-    # Try structured format (---\nTITLE: ...\nURL: ...\n---)
+    # First try to extract from grounding metadata (most reliable)
+    if grounding_metadata:
+        try:
+            if hasattr(grounding_metadata, 'grounding_chunks'):
+                print(f"[Extract] Found {len(grounding_metadata.grounding_chunks)} grounding chunks")
+                for chunk in grounding_metadata.grounding_chunks:
+                    if hasattr(chunk, 'web') and hasattr(chunk.web, 'uri'):
+                        results.append({
+                            "url": chunk.web.uri,
+                            "title": getattr(chunk.web, 'title', _extract_source_from_url(chunk.web.uri)),
+                            "source": _extract_source_from_url(chunk.web.uri),
+                            "relevance": f"Google Search for {criterion_desc[:50]}...",
+                            "excerpt": "Source from Google Search grounding"
+                        })
+        except Exception as e:
+            print(f"[Extract] Error extracting grounding metadata: {e}")
+    
+    # Also try structured format from text
     structured_pattern = r'---\s*TITLE:\s*(.+?)\s*URL:\s*(https?://[^\s]+)\s*SOURCE:\s*(.+?)\s*EXCERPT:\s*(.+?)\s*---'
     structured_matches = re.findall(structured_pattern, text, re.DOTALL | re.IGNORECASE)
     
     if structured_matches:
-        print(f"[Extract] Found {len(structured_matches)} structured results")
+        print(f"[Extract] Found {len(structured_matches)} structured results in text")
         for title, url, source, excerpt in structured_matches:
-            results.append({
-                "url": url.strip(),
-                "title": title.strip(),
-                "source": source.strip(),
-                "relevance": f"Suggested source for {criterion_desc[:50]}...",
-                "excerpt": excerpt.strip()[:300]
-            })
+            # Avoid duplicates from grounding metadata
+            if not any(r['url'] == url.strip() for r in results):
+                results.append({
+                    "url": url.strip(),
+                    "title": title.strip(),
+                    "source": source.strip(),
+                    "relevance": f"Google Search for {criterion_desc[:50]}...",
+                    "excerpt": excerpt.strip()[:300]
+                })
     
-    # Fallback: Extract any URLs
+    # Fallback: Extract any URLs from text
     if not results:
-        print("[Extract] No structured format, trying URL extraction...")
+        print("[Extract] No grounding metadata or structured format, trying URL extraction...")
         
         url_pattern = r'https?://[^\s\)\]<>"]+'
         urls = re.findall(url_pattern, text)
@@ -286,8 +341,8 @@ def _extract_search_results(text: str, criterion_desc: str) -> List[Dict]:
                 "url": url.strip(),
                 "title": title_context[:100] if title_context else _extract_source_from_url(url),
                 "source": _extract_source_from_url(url),
-                "relevance": f"Suggested source for {criterion_desc[:50]}...",
-                "excerpt": "Source suggested by Gemini"
+                "relevance": f"Google Search for {criterion_desc[:50]}...",
+                "excerpt": "Source from Google Search"
             })
     
     # Remove duplicates
@@ -324,19 +379,23 @@ def ai_search_for_evidence(
     artist_field: Optional[str] = None,
 ) -> Dict[str, List[Dict]]:
     """
-    Research using Gemini (free tier compatible).
+    Research using Vertex AI Gemini with Google Search grounding.
     
     Setup:
-    - Get API key: https://aistudio.google.com/app/apikey
-    - Add to secrets: GEMINI_API_KEY = "your-key-here"
-    - Install library: pip install google-generativeai
+    1. Create Google Cloud project
+    2. Enable Vertex AI API
+    3. Set up billing
+    4. Add to Streamlit secrets:
+       - GOOGLE_CLOUD_PROJECT = "your-project-id"
+       - GOOGLE_CLOUD_LOCATION = "us-central1" (optional)
+       - GOOGLE_APPLICATION_CREDENTIALS_JSON = {...} (service account key)
     
-    Note: Uses Gemini's knowledge to suggest likely sources.
-    Not real-time search, but works with free API keys.
+    Cost: ~$0.26 per application
+    Quality: Excellent - real Google Search results
     """
     
     print(f"\n{'='*60}")
-    print("GEMINI AI RESEARCH (Free Tier)")
+    print("VERTEX AI GEMINI + GOOGLE SEARCH")
     print(f"{'='*60}")
     print(f"Artist: {artist_name}")
     print(f"Variants: {name_variants}")
@@ -359,8 +418,8 @@ def ai_search_for_evidence(
             
             target = TARGET_RESULTS.get(cid, 5)
             
-            # Search with Gemini
-            results = _search_with_gemini(
+            # Search with Vertex AI
+            results = _search_with_vertex_ai(
                 cid,
                 criterion_desc,
                 artist_name,
@@ -389,10 +448,11 @@ def ai_search_for_evidence(
         raise RuntimeError(
             "No results found for any criterion.\n\n"
             "Possible causes:\n"
-            "1. GEMINI_API_KEY not set or invalid\n"
-            "   Get one at: https://aistudio.google.com/app/apikey\n"
-            "2. Artist name may have limited information in Gemini's knowledge\n"
-            "3. Check Streamlit logs for detailed error messages"
+            "1. Vertex AI not properly configured\n"
+            "2. GOOGLE_CLOUD_PROJECT not set\n"
+            "3. Service account credentials missing\n"
+            "4. Vertex AI API not enabled\n"
+            "5. Check Streamlit logs for detailed error messages"
         )
     
     return results_by_criterion
