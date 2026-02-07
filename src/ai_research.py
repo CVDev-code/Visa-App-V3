@@ -1,6 +1,6 @@
 """
-AI-Powered Research Assistant using Tavily for high-quality web search.
-Tavily provides: full article content, English results, prestigious sources.
+AI-Powered Research Assistant using Brave Search API for high-quality web search.
+Brave provides: comprehensive results, clean data, no tracking.
 """
 
 import json
@@ -21,69 +21,74 @@ def _get_secret(name: str):
     return os.getenv(name)
 
 
-def _search_with_tavily(query: str, max_results: int = 5) -> List[Dict]:
+def _search_with_brave(query: str, max_results: int = 10) -> List[Dict]:
     """
-    Search using Tavily API - returns high-quality sources with full content.
+    Search using Brave Search API - returns high-quality sources with snippets.
     
     Returns:
         [
             {
                 "url": "https://...",
                 "title": "Article title",
-                "content": "Full article text...",
-                "score": 0.95
+                "description": "Snippet/description",
+                "age": "Published date (if available)"
             }
         ]
     """
-    try:
-        from tavily import TavilyClient
-    except ImportError:
-        raise RuntimeError("Tavily not installed. Add 'tavily-python' to requirements.txt")
+    import requests
     
-    api_key = _get_secret("TAVILY_API_KEY")
+    api_key = _get_secret("BRAVE_API_KEY")
     if not api_key:
-        raise RuntimeError("TAVILY_API_KEY not set. Get free key at https://tavily.com")
-    
-    client = TavilyClient(api_key=api_key)
+        raise RuntimeError("BRAVE_API_KEY not set. Get free key at https://brave.com/search/api/")
     
     try:
-        # Search with Tavily
-        response = client.search(
-            query=query,
-            search_depth="advanced",  # Get more comprehensive results
-            max_results=max_results,
-            include_raw_content=True  # Get full article text
-            # Removed strict domain filters - too restrictive
-            # Let Tavily use its own quality ranking
-        )
+        # Brave Search API endpoint
+        url = "https://api.search.brave.com/res/v1/web/search"
         
-        # Check response is valid
-        if not response or not isinstance(response, dict):
-            print(f"[Tavily] Invalid response: {response}")
-            return []
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "X-Subscription-Token": api_key
+        }
+        
+        params = {
+            "q": query,
+            "count": min(max_results, 20),  # Brave allows up to 20
+            "search_lang": "en",
+            "country": "us",
+            "safesearch": "off",
+            "freshness": "all",
+            "text_decorations": False,
+            "spellcheck": True
+        }
+        
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        # Extract web results
+        web_results = data.get("web", {}).get("results", [])
         
         results = []
-        raw_results = response.get("results")
-        
-        # Check results exist and are a list
-        if not raw_results or not isinstance(raw_results, list):
-            print(f"[Tavily] No results or invalid results format")
-            return []
-        
-        for item in raw_results:
+        for item in web_results[:max_results]:
             if not item or not isinstance(item, dict):
                 continue
+            
             results.append({
                 "url": item.get("url", ""),
                 "title": item.get("title", ""),
-                "content": item.get("raw_content", item.get("content", "")),
-                "score": item.get("score", 0.0)
+                "description": item.get("description", ""),
+                "age": item.get("age", ""),
+                "page_age": item.get("page_age", ""),
+                "language": item.get("language", ""),
+                "family_friendly": item.get("family_friendly", True)
             })
         
         return results
         
     except Exception as e:
-        print(f"[_search_with_tavily] Error: {e}")
+        print(f"[_search_with_brave] Error: {e}")
         return []
 
 
@@ -94,7 +99,7 @@ Analyze search results and determine which URLs are most relevant for the specif
 
 For each relevant URL, extract:
 - Why it supports the criterion
-- A brief excerpt (1-2 sentences) that shows the evidence
+- A brief excerpt from the description that shows the evidence
 
 Return ONLY valid JSON."""
 
@@ -131,7 +136,7 @@ For Criterion 1 (Awards):
 
 For each result, determine:
 1. Is the source credible and prestigious enough for O-1 purposes?
-2. Does it clearly mention the artist by name?
+2. Does it clearly mention the artist by name (check the description)?
 3. Does it show the artist in a lead/prominent role OR at a distinguished venue?
 4. What SPECIFIC evidence does it provide that USCIS would find compelling?
 
@@ -143,7 +148,7 @@ Return JSON:
       "title": "...",
       "source": "Publication name (e.g., 'The Guardian', 'Gramophone')",
       "relevance": "Explain WHY this satisfies the O-1 criterion - be specific about role/venue/recognition",
-      "excerpt": "Quote 1-2 sentences that show the artist's prominence or venue's prestige"
+      "excerpt": "Quote from the description that shows the artist's prominence or venue's prestige"
     }}
   ]
 }}
@@ -160,11 +165,11 @@ def ai_search_for_evidence(
     feedback: Optional[Dict] = None,
 ) -> Dict[str, List[Dict]]:
     """
-    Search for evidence using Tavily + OpenAI analysis.
+    Search for evidence using Brave Search + OpenAI analysis.
     
     Process:
     1. For each criterion, generate targeted search query
-    2. Search with Tavily (gets high-quality results)
+    2. Search with Brave (gets high-quality results)
     3. Use OpenAI to analyze and rank results
     4. Return best sources with relevance explanations
     """
@@ -202,16 +207,16 @@ def ai_search_for_evidence(
             
             print(f"[Criterion {cid}] Searching: {search_query}")
             
-            # Search with Tavily - get MORE results (10-15)
-            search_results = _search_with_tavily(search_query, max_results=15)
+            # Search with Brave - get MORE results (15-20)
+            search_results = _search_with_brave(search_query, max_results=20)
             
             if not search_results:
-                print(f"[Criterion {cid}] No results from Tavily")
+                print(f"[Criterion {cid}] No results from Brave")
                 continue
             
             # Use OpenAI to analyze which results are most relevant
             search_results_text = "\n\n".join([
-                f"URL: {r.get('url', 'N/A')}\nTitle: {r.get('title', 'N/A')}\nContent Preview: {(r.get('content') or '')[:500]}..."
+                f"URL: {r.get('url', 'N/A')}\nTitle: {r.get('title', 'N/A')}\nDescription: {r.get('description', 'N/A')}\nAge: {r.get('age', 'N/A')}"
                 for r in search_results
                 if r and isinstance(r, dict)
             ])
@@ -248,19 +253,6 @@ def ai_search_for_evidence(
             if not relevant or not isinstance(relevant, list):
                 print(f"[Criterion {cid}] No relevant sources found")
                 continue
-            
-            # Add full content from Tavily results
-            for item in relevant:
-                if not isinstance(item, dict):
-                    continue
-                url = item.get("url", "")
-                if not url:
-                    continue
-                # Find matching Tavily result to get full content
-                for tavily_result in search_results:
-                    if tavily_result and isinstance(tavily_result, dict) and tavily_result.get("url") == url:
-                        item["full_content"] = tavily_result.get("content", "")
-                        break
             
             results_by_criterion[cid] = relevant[:10]  # Top 10
             print(f"[Criterion {cid}] Found {len(relevant)} relevant sources")
@@ -300,49 +292,41 @@ def _generate_query_for_criterion(
     if criterion_id == "1":
         # Criterion 1: Awards and Prizes
         # Search for official announcements from award-granting bodies
-        return f'{search_name} award winner OR prize recipient OR competition winner OR laureate announcement'
+        return f'"{search_name}" award winner OR prize recipient OR competition winner OR laureate announcement'
     
     elif criterion_id == "3":
         # Criterion 3: National/International Recognition via Critical Reviews
         # PRIORITY: Trade press + major news outlets covering internationally recognized performances
-        # Your exact approach: reviews where artist is in prestigious/lead role OR performing at distinguished venues
-        return f'{search_name} review OR critique performance lead role OR principal OR soloist distinguished venue OR prestigious production major opera house OR philharmonic OR symphony'
+        return f'"{search_name}" review OR critique performance lead role OR principal OR soloist distinguished venue OR prestigious production'
     
     elif criterion_id == "2_past":
         # Criterion 2 Past: Lead/Starring role in PAST productions with distinguished reputation
-        # Search for past performances where they had a lead role at distinguished venues
-        return f'{search_name} performed lead role OR principal OR soloist OR starring Metropolitan Opera OR Royal Opera OR Berlin Philharmonic OR Vienna State Opera OR Salzburg Festival OR Glyndebourne'
+        return f'"{search_name}" performed lead role OR principal OR soloist Metropolitan Opera OR Royal Opera OR Berlin Philharmonic OR Vienna State Opera'
     
     elif criterion_id == "2_future":
         # Criterion 2 Future: Lead/Starring role in FUTURE productions with distinguished reputation
-        # Search for announcements of upcoming performances in lead roles
-        return f'{search_name} upcoming OR will perform OR announced OR season 2025 OR 2026 lead role OR principal OR soloist Metropolitan Opera OR Royal Opera OR major venue'
+        return f'"{search_name}" upcoming OR will perform OR announced lead role OR principal OR soloist 2025 OR 2026'
     
     elif criterion_id == "4_past":
         # Criterion 4 Past: Lead/critical role for PAST distinguished organizations
-        # Search for documented past work with distinguished organizations
-        return f'{search_name} performed with OR appeared at distinguished organization OR prestigious ensemble OR major opera company OR symphony orchestra'
+        return f'"{search_name}" performed with OR appeared at distinguished organization OR prestigious ensemble'
     
     elif criterion_id == "4_future":
         # Criterion 4 Future: Lead/critical role for FUTURE distinguished organizations
-        # Search for future engagements with distinguished organizations
-        return f'{search_name} will perform OR upcoming engagement OR announced season distinguished venue OR prestigious company OR major festival'
+        return f'"{search_name}" will perform OR upcoming engagement OR announced season distinguished venue OR prestigious company'
     
     elif criterion_id == "5":
         # Criterion 5: Record of commercial or critically acclaimed successes
-        # Search for evidence of major success, sold-out performances, recordings
-        return f'{search_name} sold out OR box office success OR critically acclaimed OR chart-topping OR bestselling recording OR major success'
+        return f'"{search_name}" sold out OR box office success OR critically acclaimed OR bestselling recording'
     
     elif criterion_id == "6":
         # Criterion 6: Recognition from organizations, critics, and experts
-        # Search for praise and recognition from credible sources
-        return f'{search_name} praised by OR recognized by OR acclaimed by critic OR expert OR organization award OR honor OR recognition'
+        return f'"{search_name}" praised by OR recognized by OR acclaimed by critic OR expert OR organization'
     
     elif criterion_id == "7":
         # Criterion 7: High salary or substantial remuneration
-        # Search for evidence of high-level contracts and engagements
-        return f'{search_name} contract OR engagement fee OR appearance OR residency major venue OR international tour'
+        return f'"{search_name}" contract OR engagement fee OR appearance major venue OR international tour'
     
     else:
         # Generic fallback
-        return f'{search_name} opera OR performance OR concert review'
+        return f'"{search_name}" opera OR performance OR concert review'
