@@ -90,7 +90,7 @@ with main_tab1:
     if search_btn:
         with st.spinner("🤖 AI is searching all criteria... This may take 1-2 minutes."):
             try:
-                from src.ai_research_brave import ai_search_for_evidence
+                from src.ai_research import ai_search_for_evidence
                 
                 # Search ALL criteria
                 all_criteria = list(CRITERIA.keys())
@@ -219,7 +219,7 @@ with main_tab1:
                 if st.button("🔄 Regenerate", key=f"regen_{cid}"):
                     with st.spinner("Searching for better sources..."):
                         try:
-                            from src.ai_research_brave import ai_search_for_evidence
+                            from src.ai_research import ai_search_for_evidence
                             
                             feedback = {
                                 "approved_urls": approved,
