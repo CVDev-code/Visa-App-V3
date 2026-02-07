@@ -1,7 +1,12 @@
 streamlit>=1.33
 pymupdf>=1.23
-openai>=1.40.0
 python-dotenv>=1.0.1
+
+# OpenAI for quote extraction (PDF Highlighter tab)
+openai>=1.40.0
+
+# Google Gemini for web search (Research tab)
+google-generativeai>=0.3.0
 
 # Web scraping and PDF conversion
 requests>=2.31.0
@@ -17,6 +22,6 @@ weasyprint>=60.0
 # HTML parsing
 html5lib>=1.1
 
-# Translation support - Using deep-translator instead of googletrans
+# Translation support
 deep-translator>=1.11.4
 langdetect>=1.0.9
