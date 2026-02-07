@@ -20,7 +20,79 @@ from typing import Dict, Optional, Tuple, List
 from datetime import datetime
 
 
-def fetch_webpage_content(url: str) -> Dict[str, str]:
+# ============================================================
+# Translation Support
+# ============================================================
+
+def _detect_and_translate_content(content: str, html_content: str = "") -> Tuple[str, bool]:
+    """
+    Detect language and translate to English if needed.
+    
+    Args:
+        content: Text content to check/translate
+        html_content: Optional HTML for better language detection
+        
+    Returns:
+        (translated_content, was_translated)
+    """
+    try:
+        from langdetect import detect, LangDetectException
+        from googletrans import Translator
+        
+        # Use HTML if available for better detection, otherwise use content
+        detection_text = (html_content[:2000] if html_content else content[:2000]).strip()
+        
+        if not detection_text:
+            return content, False
+        
+        try:
+            detected_lang = detect(detection_text)
+        except LangDetectException:
+            # If detection fails, assume English
+            return content, False
+        
+        print(f"[Translation] Detected language: {detected_lang}")
+        
+        # If already English, no translation needed
+        if detected_lang == 'en':
+            return content, False
+        
+        # Translate to English
+        print(f"[Translation] Translating from {detected_lang} to English...")
+        translator = Translator()
+        
+        # Split into chunks (Google Translate has length limits)
+        max_chunk_size = 4000
+        chunks = [content[i:i+max_chunk_size] for i in range(0, len(content), max_chunk_size)]
+        
+        translated_chunks = []
+        for i, chunk in enumerate(chunks):
+            print(f"[Translation] Translating chunk {i+1}/{len(chunks)}...")
+            try:
+                result = translator.translate(chunk, src=detected_lang, dest='en')
+                translated_chunks.append(result.text)
+            except Exception as e:
+                print(f"[Translation] Error translating chunk {i+1}: {e}")
+                translated_chunks.append(chunk)  # Keep original if translation fails
+        
+        translated_content = '\n'.join(translated_chunks)
+        print(f"[Translation] Successfully translated {len(chunks)} chunks")
+        
+        return translated_content, True
+        
+    except ImportError:
+        print("[Translation] Translation libraries not installed (googletrans, langdetect)")
+        print("[Translation] Install with: pip install googletrans==4.0.0rc1 langdetect")
+        return content, False
+        
+    except Exception as e:
+        print(f"[Translation] Error during translation: {e}")
+        import traceback
+        traceback.print_exc()
+        return content, False
+
+
+def fetch_webpage_content(url: str, translate_to_english: bool = True) -> Dict[str, str]:
     """
     Fetch and extract clean content from a webpage.
     
@@ -114,6 +186,12 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
         else:
             content = article.text or ""
         
+        # Translate if needed
+        if translate_to_english and content:
+            content, was_translated = _detect_and_translate_content(content, article.html)
+            if was_translated:
+                print(f"[Translation] Content translated to English")
+        
         return {
             "title": article.title or "Untitled",
             "author": ", ".join(article.authors) if article.authors else "",
@@ -204,6 +282,12 @@ def fetch_webpage_content(url: str) -> Dict[str, str]:
             # Clean up: remove multiple blank lines
             import re
             content = re.sub(r'\n{3,}', '\n\n', content)
+            
+            # Translate if needed
+            if translate_to_english and content:
+                content, was_translated = _detect_and_translate_content(content, str(soup))
+                if was_translated:
+                    print(f"[Translation] Content translated to English")
             
             return {
                 "title": title,
@@ -779,7 +863,8 @@ def _format_content_to_html(text: str) -> str:
 
 def batch_convert_urls_to_pdfs(
     urls_by_criterion: Dict[str, list],
-    progress_callback=None
+    progress_callback=None,
+    translate_to_english: bool = True
 ) -> Dict[str, Dict[str, bytes]]:
     """
     Convert multiple approved URLs to PDFs, organized by criterion.
@@ -787,6 +872,7 @@ def batch_convert_urls_to_pdfs(
     Args:
         urls_by_criterion: {"1": [{"url": "...", "title": "..."}], ...}
         progress_callback: Optional function to call with progress updates
+        translate_to_english: If True, automatically translate non-English content
         
     Returns:
         {
@@ -813,8 +899,8 @@ def batch_convert_urls_to_pdfs(
                 if progress_callback:
                     progress_callback(processed, total_urls, f"Fetching: {title}")
                 
-                # Fetch webpage
-                webpage_data = fetch_webpage_content(url)
+                # Fetch webpage (with translation if enabled)
+                webpage_data = fetch_webpage_content(url, translate_to_english=translate_to_english)
                 
                 if progress_callback:
                     progress_callback(processed, total_urls, f"Converting: {title}")
