@@ -17,6 +17,6 @@ weasyprint>=60.0
 # HTML parsing
 html5lib>=1.1
 
-# Translation support
-googletrans==4.0.0rc1
+# Translation support - Using deep-translator instead of googletrans
+deep-translator>=1.11.4
 langdetect>=1.0.9
