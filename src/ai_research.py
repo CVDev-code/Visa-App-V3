@@ -1,13 +1,11 @@
 """
-AI-Powered Research Assistant using Brave Search API for high-quality web search.
-Brave provides: comprehensive results, clean data, no tracking.
+AI-Powered Research Assistant using Brave Search API.
+NO AI filtering - returns all search results for manual review.
 """
 
-import json
 import os
 from typing import Dict, List, Optional
-
-from openai import OpenAI
+from urllib.parse import urlparse
 
 
 def _get_secret(name: str):
@@ -23,7 +21,7 @@ def _get_secret(name: str):
 
 def _search_with_brave(query: str, max_results: int = 10) -> List[Dict]:
     """
-    Search using Brave Search API - returns high-quality sources with snippets.
+    Search using Brave Search API - returns search results.
     
     Returns:
         [
@@ -89,72 +87,24 @@ def _search_with_brave(query: str, max_results: int = 10) -> List[Dict]:
         
     except Exception as e:
         print(f"[_search_with_brave] Error: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 
-# System prompt for analyzing search results
-ANALYSIS_SYSTEM_PROMPT = """You are an expert immigration paralegal for O-1 visa petitions.
-
-Analyze search results and determine which URLs are most relevant for the specified criterion.
-
-For each relevant URL, extract:
-- Why it supports the criterion
-- A brief excerpt from the description that shows the evidence
-
-Return ONLY valid JSON."""
-
-
-ANALYSIS_PROMPT_TEMPLATE = """Analyze these search results for O-1 Criterion {criterion_id}.
-
-Criterion: {criterion_description}
-
-Artist: {artist_name}
-Variants: {name_variants}
-
-Search Results:
-{search_results}
-
-CRITICAL O-1 VISA REQUIREMENTS:
-You must identify sources that will satisfy USCIS adjudicators under 8 CFR 214.4.
-
-For Criterion 3 (Reviews):
-- PRIORITIZE: Notable trade press (Gramophone, Opera News, Musical America, Bachtrack, Seen and Heard International)
-- PRIORITIZE: Major reputable news (New York Times, Guardian, Financial Times, Washington Post)
-- The review must describe the artist in a PRESTIGIOUS or LEAD role (principal, soloist, leading role)
-- OR the review must be about a performance at a DISTINGUISHED venue (Met Opera, Royal Opera, Berlin Phil, major festivals)
-- REJECT: Local papers, blogs, amateur reviews, minor venues
-
-For Criteria 2 & 4 (Distinguished Performances/Organizations):
-- Must document performances at venues known to be internationally distinguished
-- Must show the artist had a lead/critical/prominent role
-- Examples of distinguished: Metropolitan Opera, Royal Opera House, Berlin Philharmonic, Vienna State Opera, Salzburg Festival, Glyndebourne
-- REJECT: Community theaters, student performances, small local venues
-
-For Criterion 1 (Awards):
-- Must be from the OFFICIAL award-granting body (not news about awards)
-- Must be nationally or internationally recognized competitions/awards
-
-For each result, determine:
-1. Is the source credible and prestigious enough for O-1 purposes?
-2. Does it clearly mention the artist by name (check the description)?
-3. Does it show the artist in a lead/prominent role OR at a distinguished venue?
-4. What SPECIFIC evidence does it provide that USCIS would find compelling?
-
-Return JSON:
-{{
-  "relevant_sources": [
-    {{
-      "url": "https://...",
-      "title": "...",
-      "source": "Publication name (e.g., 'The Guardian', 'Gramophone')",
-      "relevance": "Explain WHY this satisfies the O-1 criterion - be specific about role/venue/recognition",
-      "excerpt": "Quote from the description that shows the artist's prominence or venue's prestige"
-    }}
-  ]
-}}
-
-IMPORTANT: Only include sources that would genuinely satisfy USCIS under 8 CFR 214.4. Quality over quantity.
-If a source is from a minor publication or doesn't show distinguished achievement, EXCLUDE it."""
+def _extract_source_from_url(url: str) -> str:
+    """Extract publication name from URL"""
+    try:
+        domain = urlparse(url).netloc
+        # Remove www. and common TLDs
+        domain = domain.replace("www.", "")
+        parts = domain.split(".")
+        if len(parts) > 1:
+            # Capitalize first part (e.g., "nytimes" -> "Nytimes")
+            return parts[0].capitalize()
+        return domain.capitalize()
+    except:
+        return "Unknown Source"
 
 
 def ai_search_for_evidence(
@@ -165,21 +115,29 @@ def ai_search_for_evidence(
     feedback: Optional[Dict] = None,
 ) -> Dict[str, List[Dict]]:
     """
-    Search for evidence using Brave Search + OpenAI analysis.
+    Search for evidence using Brave Search.
+    
+    NO AI FILTERING - returns all search results for manual review.
     
     Process:
     1. For each criterion, generate targeted search query
-    2. Search with Brave (gets high-quality results)
-    3. Use OpenAI to analyze and rank results
-    4. Return best sources with relevance explanations
+    2. Search with Brave
+    3. Return ALL results (user filters manually in UI)
+    
+    Returns:
+        {
+            "1": [
+                {
+                    "url": "https://...",
+                    "title": "...",
+                    "source": "Publication Name",
+                    "relevance": "Search result for criterion X",
+                    "excerpt": "Description snippet from search"
+                }
+            ],
+            "3": [...]
+        }
     """
-    openai_key = _get_secret("OPENAI_API_KEY")
-    if not openai_key:
-        raise RuntimeError("OPENAI_API_KEY not set")
-    
-    model = _get_secret("OPENAI_MODEL") or "gpt-4o-mini"
-    client = OpenAI(api_key=openai_key)
-    
     results_by_criterion = {}
     
     for cid in selected_criteria:
@@ -200,62 +158,34 @@ def ai_search_for_evidence(
             
             # Apply feedback if regenerating
             if feedback:
-                rejected = feedback.get("rejected_urls", [])
                 user_feedback = feedback.get("user_feedback", "")
                 if user_feedback:
                     search_query += f" {user_feedback}"
             
             print(f"[Criterion {cid}] Searching: {search_query}")
             
-            # Search with Brave - get MORE results (15-20)
+            # Search with Brave
             search_results = _search_with_brave(search_query, max_results=20)
             
             if not search_results:
                 print(f"[Criterion {cid}] No results from Brave")
                 continue
             
-            # Use OpenAI to analyze which results are most relevant
-            search_results_text = "\n\n".join([
-                f"URL: {r.get('url', 'N/A')}\nTitle: {r.get('title', 'N/A')}\nDescription: {r.get('description', 'N/A')}\nAge: {r.get('age', 'N/A')}"
-                for r in search_results
-                if r and isinstance(r, dict)
-            ])
+            print(f"[Criterion {cid}] Got {len(search_results)} results from Brave")
             
-            if not search_results_text:
-                print(f"[Criterion {cid}] Could not format search results")
-                continue
+            # Convert to expected format (NO FILTERING - return everything)
+            formatted_results = []
+            for r in search_results:
+                formatted_results.append({
+                    "url": r.get("url", ""),
+                    "title": r.get("title", ""),
+                    "source": _extract_source_from_url(r.get("url", "")),
+                    "relevance": f"Search result for {criterion_desc[:50]}...",
+                    "excerpt": r.get("description", "")[:300]  # Limit excerpt length
+                })
             
-            prompt = ANALYSIS_PROMPT_TEMPLATE.format(
-                criterion_id=cid,
-                criterion_description=criterion_desc,
-                artist_name=artist_name,
-                name_variants=", ".join(name_variants) if name_variants else "None",
-                search_results=search_results_text
-            )
-            
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"}
-            )
-            
-            raw = resp.choices[0].message.content
-            if not raw:
-                print(f"[Criterion {cid}] No content in OpenAI response")
-                continue
-                
-            data = json.loads(raw)
-            
-            relevant = data.get("relevant_sources", [])
-            if not relevant or not isinstance(relevant, list):
-                print(f"[Criterion {cid}] No relevant sources found")
-                continue
-            
-            results_by_criterion[cid] = relevant[:10]  # Top 10
-            print(f"[Criterion {cid}] Found {len(relevant)} relevant sources")
+            results_by_criterion[cid] = formatted_results
+            print(f"[Criterion {cid}] Returning {len(formatted_results)} results for manual review")
         
         except Exception as e:
             print(f"[Criterion {cid}] Error: {str(e)}")
@@ -264,7 +194,13 @@ def ai_search_for_evidence(
             continue
     
     if not results_by_criterion:
-        raise RuntimeError("No results found for any criterion. Check that artist name is correct and has online presence.")
+        raise RuntimeError(
+            "No results found for any criterion. Possible causes:\n"
+            "1. Brave Search API key is invalid or expired\n"
+            "2. Artist name spelling may be incorrect\n"
+            "3. Artist may have very limited online presence\n"
+            "Check Streamlit logs for detailed error messages"
+        )
     
     return results_by_criterion
 
@@ -276,9 +212,10 @@ def _generate_query_for_criterion(
     name_variants: List[str]
 ) -> str:
     """
-    Generate an optimized search query for the criterion.
+    Generate search query for the criterion.
     
-    Uses detailed O-1 visa specific search strategies based on 8 CFR 214.4 requirements.
+    Queries are broad to find all relevant content.
+    User will filter manually in the UI.
     """
     
     # Use primary name or first variant
@@ -287,46 +224,44 @@ def _generate_query_for_criterion(
     if not search_name:
         return ""
     
-    # O-1 VISA SPECIFIC CRITERION SEARCHES
+    # BROAD QUERIES - Find everything, let user filter
     
     if criterion_id == "1":
         # Criterion 1: Awards and Prizes
-        # Search for official announcements from award-granting bodies
-        return f'"{search_name}" award winner OR prize recipient OR competition winner OR laureate announcement'
+        return f'"{search_name}" award OR prize OR competition OR winner'
     
     elif criterion_id == "3":
-        # Criterion 3: National/International Recognition via Critical Reviews
-        # PRIORITY: Trade press + major news outlets covering internationally recognized performances
-        return f'"{search_name}" review OR critique performance lead role OR principal OR soloist distinguished venue OR prestigious production'
+        # Criterion 3: Reviews
+        return f'"{search_name}" review OR performance OR concert'
     
     elif criterion_id == "2_past":
-        # Criterion 2 Past: Lead/Starring role in PAST productions with distinguished reputation
-        return f'"{search_name}" performed lead role OR principal OR soloist Metropolitan Opera OR Royal Opera OR Berlin Philharmonic OR Vienna State Opera'
+        # Criterion 2 Past: Past performances
+        return f'"{search_name}" performed OR performance OR role'
     
     elif criterion_id == "2_future":
-        # Criterion 2 Future: Lead/Starring role in FUTURE productions with distinguished reputation
-        return f'"{search_name}" upcoming OR will perform OR announced lead role OR principal OR soloist 2025 OR 2026'
+        # Criterion 2 Future: Future performances
+        return f'"{search_name}" upcoming OR "will perform" OR announced 2025 OR 2026'
     
     elif criterion_id == "4_past":
-        # Criterion 4 Past: Lead/critical role for PAST distinguished organizations
-        return f'"{search_name}" performed with OR appeared at distinguished organization OR prestigious ensemble'
+        # Criterion 4 Past
+        return f'"{search_name}" performed OR appeared OR engagement'
     
     elif criterion_id == "4_future":
-        # Criterion 4 Future: Lead/critical role for FUTURE distinguished organizations
-        return f'"{search_name}" will perform OR upcoming engagement OR announced season distinguished venue OR prestigious company'
+        # Criterion 4 Future
+        return f'"{search_name}" upcoming OR future OR "will perform"'
     
     elif criterion_id == "5":
-        # Criterion 5: Record of commercial or critically acclaimed successes
-        return f'"{search_name}" sold out OR box office success OR critically acclaimed OR bestselling recording'
+        # Criterion 5: Success
+        return f'"{search_name}" success OR acclaimed OR "sold out"'
     
     elif criterion_id == "6":
-        # Criterion 6: Recognition from organizations, critics, and experts
-        return f'"{search_name}" praised by OR recognized by OR acclaimed by critic OR expert OR organization'
+        # Criterion 6: Recognition
+        return f'"{search_name}" recognized OR praised OR acclaimed'
     
     elif criterion_id == "7":
-        # Criterion 7: High salary or substantial remuneration
-        return f'"{search_name}" contract OR engagement fee OR appearance major venue OR international tour'
+        # Criterion 7: Salary
+        return f'"{search_name}" contract OR fee OR engagement'
     
     else:
         # Generic fallback
-        return f'"{search_name}" opera OR performance OR concert review'
+        return f'"{search_name}" performance OR concert'
