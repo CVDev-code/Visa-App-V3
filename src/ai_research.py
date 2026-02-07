@@ -1,30 +1,23 @@
 """
-AI-Powered Research Assistant - Using OpenAI's Native Web Search
-CORRECTED VERSION - Proper API response handling.
+AI-Powered Research Assistant - Using Gemini's Google Search Grounding
+This uses Google's Gemini API with Google Search grounding for web research.
 
-This uses ChatGPT's web_search tool via API.
-No Brave API needed. No agent setup needed.
-Just set OPENAI_API_KEY and it works.
+Setup:
+- Get API key from: https://aistudio.google.com/app/apikey
+- Set GEMINI_API_KEY in Streamlit secrets or environment
 """
 
 import os
-import json
 import re
+import json
 from typing import Dict, List, Optional
-from openai import OpenAI
 
 # Import customizable search prompts
 try:
-    from .search_prompts import SEARCH_PROMPTS, SEARCH_SYSTEM_PROMPT
+    from .search_prompts import SEARCH_PROMPTS
 except ImportError:
-    # Fallback if search_prompts.py not found
     SEARCH_PROMPTS = None
-    SEARCH_SYSTEM_PROMPT = None
 
-
-# ============================================================
-# Configuration
-# ============================================================
 
 TARGET_RESULTS = {
     "1": 5,
@@ -40,6 +33,7 @@ TARGET_RESULTS = {
 
 
 def _get_secret(name: str):
+    """Get secret from Streamlit or environment."""
     try:
         import streamlit as st
         if name in st.secrets:
@@ -49,75 +43,71 @@ def _get_secret(name: str):
     return os.getenv(name)
 
 
-# ============================================================
-# OpenAI Web Search (ChatGPT-Style)
-# ============================================================
-
-def _search_with_chatgpt(
+def _search_with_gemini(
     criterion_id: str,
     criterion_desc: str,
     artist_name: str,
     target_count: int,
 ) -> List[Dict]:
     """
-    Use OpenAI's web_search tool - exactly like ChatGPT.
+    Use Gemini's Google Search grounding to find sources.
     
-    This is the same search ChatGPT uses when you ask it to search the web.
+    This is more reliable than OpenAI's web search and uses actual Google Search.
     """
     
-    api_key = _get_secret("OPENAI_API_KEY")
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        raise RuntimeError(
+            "Google Generative AI library not installed.\n"
+            "Install with: pip install google-generativeai"
+        )
+    
+    # Get API key
+    api_key = _get_secret("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY not set")
+        raise RuntimeError(
+            "GEMINI_API_KEY not found.\n"
+            "Get one at: https://aistudio.google.com/app/apikey\n"
+            "Add to Streamlit secrets or environment variables."
+        )
     
-    model = _get_secret("OPENAI_MODEL") or "gpt-4o"
-    client = OpenAI(api_key=api_key)
+    # Configure Gemini
+    genai.configure(api_key=api_key)
     
-    # Build criterion-specific search prompt
+    # Build search prompt
     search_prompt = _build_search_prompt(criterion_id, criterion_desc, artist_name, target_count)
     
-    print(f"[ChatGPT Search] Criterion {criterion_id}: {search_prompt[:100]}...")
+    print(f"\n{'='*60}")
+    print(f"[Gemini Search] Criterion {criterion_id}: {criterion_desc[:50]}...")
+    print(f"{'='*60}")
     
     try:
-        # Use web_search tool (same as ChatGPT)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": SEARCH_SYSTEM_PROMPT if SEARCH_SYSTEM_PROMPT else """You are a USCIS immigration attorney researching O-1 visa evidence. 
-Search the web and return sources that meet USCIS standards for extraordinary ability.
-
-CRITICAL: Your response must include:
-1. For each source: Full URL in markdown link format [Title](URL)
-2. Brief description of why it's relevant
-3. Key quote or excerpt if applicable
-
-Format your response like:
-1. [Article Title](https://full-url.com) - Why this is strong evidence
-2. [Another Article](https://another-url.com) - Key points from this source
-etc."""
-                },
-                {
-                    "role": "user",
-                    "content": search_prompt
-                }
-            ],
-            tools=[
-                {
-                    "type": "web_search_20250305",
-                    "name": "web_search"
-                }
-            ],
+        # Create model with Google Search grounding
+        model = genai.GenerativeModel(
+            'gemini-1.5-pro',
+            tools='google_search_retrieval'  # This enables Google Search
         )
         
-        # Extract search results from response
-        results = _extract_search_results(response, criterion_desc)
+        print("[Gemini Search] Searching with Google Search grounding...")
         
-        print(f"[ChatGPT Search] Found {len(results)} results")
+        # Generate content with search
+        response = model.generate_content(search_prompt)
+        
+        # Extract text and grounding metadata
+        text = response.text
+        
+        print(f"[Gemini Search] Response length: {len(text)} chars")
+        
+        # Extract URLs from response
+        results = _extract_search_results(text, criterion_desc, response)
+        
+        print(f"[Gemini Search] Found {len(results)} results")
+        
         return results
         
     except Exception as e:
-        print(f"[ChatGPT Search] Error: {e}")
+        print(f"[Gemini Search] Error: {e}")
         import traceback
         traceback.print_exc()
         return []
@@ -130,221 +120,233 @@ def _build_search_prompt(
     target_count: int,
 ) -> str:
     """
-    Build criterion-specific search prompts.
-    
-    Uses prompts from search_prompts.py if available,
-    otherwise falls back to built-in defaults.
+    Build criterion-specific search prompts for Gemini.
     """
     
-    # Try to use external customizable prompts first
+    # Try external prompts first
     if SEARCH_PROMPTS and criterion_id in SEARCH_PROMPTS:
         template = SEARCH_PROMPTS[criterion_id]
-        return template.format(
+        base_prompt = template.format(
             artist_name=artist_name,
             target_count=target_count
         )
+    else:
+        # Fallback to built-in prompts
+        base_prompt = _get_default_prompt(criterion_id, artist_name, target_count)
     
-    # Fallback to built-in prompts
+    # Add Gemini-specific instructions
+    gemini_instructions = f"""
+
+IMPORTANT FORMATTING INSTRUCTIONS:
+For each source you find, provide:
+1. Full article title
+2. Complete URL (starting with https://)
+3. Publication name
+4. Brief excerpt or reason it's relevant
+
+Format each result like this:
+---
+TITLE: [Article Title]
+URL: https://complete-url.com
+SOURCE: [Publication Name]
+EXCERPT: [Key quote or why it's relevant]
+---
+
+Find exactly {target_count} high-quality sources that meet USCIS O-1 standards."""
+    
+    return base_prompt + gemini_instructions
+
+
+def _get_default_prompt(criterion_id: str, artist_name: str, target_count: int) -> str:
+    """Default search prompts if search_prompts.py not available."""
+    
     prompts = {
-        "1": f"""Find {target_count} sources showing {artist_name} has won significant national or international awards or prizes.
+        "1": f"""Search Google for evidence that {artist_name} has won significant national or international awards or prizes.
 
-USCIS Requirements for O-1:
+USCIS O-1 Requirements:
 - Named, prestigious awards (Grammy, Pulitzer, MacArthur, major international competitions)
-- Official announcements from award organizations or major publications
-- NOT nominations, "best of" lists, or local community awards
+- Official announcements from award organizations
+- Coverage in major publications (New York Times, Guardian, etc.)
+- NOT nominations or local awards
 
-Search for:
-- Award announcements from official organizations
-- Coverage in major newspapers (NYT, Guardian, etc.)
-- Industry publication reports (e.g., Gramophone for classical music)
+Find {target_count} sources showing award wins.""",
 
-For each source found, provide:
-- [Full Article Title](complete URL)
-- Brief description of the award
-- Why this meets O-1 standards
+        "3": f"""Search Google for critical reviews and feature articles about {artist_name}.
 
-IMPORTANT: Include the complete URL for each source.""",
-
-        "3": f"""Find {target_count} critical reviews or feature articles about {artist_name} from prestigious publications.
-
-USCIS Requirements for O-1:
-- Reviews from major publications (New York Times, Guardian, Gramophone, BBC, NPR, etc.)
+USCIS O-1 Requirements:
+- Reviews from prestigious publications (NYT, Guardian, Gramophone, BBC, NPR)
 - Feature articles demonstrating distinguished reputation
-- Critical analysis, not just event listings or brief mentions
+- Critical analysis, not just event listings
 
 Search for:
-- Concert or performance reviews
-- Album or recording reviews  
-- Feature articles or profiles
-- Critical essays about the artist's work
+- Concert/performance reviews
+- Album/recording reviews
+- Feature articles and profiles
+- Critical essays
 
-For each review found, provide:
-- [Article Title](complete URL)
-- Publication name and date
-- Key excerpt showing critical acclaim
+Find {target_count} reviews from major publications.""",
 
-IMPORTANT: Include complete URLs. Prioritize prestigious publications.""",
+        "2_past": f"""Search Google for evidence of {artist_name}'s PAST lead or starring roles in productions/events with distinguished reputation.
 
-        "2_past": f"""Find {target_count} sources showing {artist_name} had lead or starring roles in PAST productions or events with distinguished reputation.
-
-Search for:
+Look for:
 - Past performances at major venues (Carnegie Hall, Royal Opera House, etc.)
 - Lead roles in distinguished productions
 - Starring engagements with prestigious organizations
 
-For each source, provide:
-- [Article Title](complete URL)
-- Venue/event name, role, date
+Find {target_count} sources about past performances.""",
 
-IMPORTANT: Include complete URLs.""",
+        "2_future": f"""Search Google for {artist_name}'s UPCOMING (2025-2026) lead or starring roles.
 
-        "2_future": f"""Find {target_count} sources showing {artist_name} has UPCOMING (2025-2026) lead or starring roles.
-
-Search for:
+Look for:
 - Announced performances at major venues
-- Future engagements
+- Future engagements with prestigious organizations
 - Upcoming tours or productions
 
-For each source, provide:
-- [Announcement Title](complete URL)
-- Venue/event name, role, date
+Find {target_count} sources about future performances.""",
 
-IMPORTANT: Include complete URLs.""",
+        "4_past": f"""Search Google for {artist_name}'s PAST lead, starring, or critical roles for distinguished organizations.
 
-        "4_past": f"""Find {target_count} sources showing {artist_name} had PAST lead, starring, or critical roles for distinguished organizations.
-
-Search for:
+Look for:
 - Past engagements with major orchestras, opera companies, festivals
 - Critical roles with prestigious organizations
 
-For each source, provide:
-- [Article Title](complete URL)
-- Organization name, role, date""",
+Find {target_count} sources.""",
 
-        "4_future": f"""Find {target_count} sources showing {artist_name} has FUTURE engagements with distinguished organizations.
+        "4_future": f"""Search Google for {artist_name}'s FUTURE engagements with distinguished organizations.
 
-Search for:
+Look for:
 - Announced engagements with major organizations
-- Future performances
+- Future performances with prestigious ensembles
 
-For each source, provide:
-- [Announcement Title](complete URL)
-- Organization name, role, date""",
+Find {target_count} sources.""",
 
-        "5": f"""Find {target_count} sources showing {artist_name} has achieved major commercial or critically acclaimed successes.
+        "5": f"""Search Google for evidence of {artist_name}'s major commercial or critically acclaimed successes.
 
-Search for:
+Look for:
 - Sold-out performances
 - Chart success or sales records
 - Critical acclaim
 - Box office success
 
-For each source, provide:
-- [Article Title](complete URL)
-- Success metric described""",
+Find {target_count} sources.""",
 
-        "6": f"""Find {target_count} sources showing {artist_name} has received significant recognition from organizations, critics, or experts.
+        "6": f"""Search Google for evidence of {artist_name} receiving significant recognition from organizations, critics, or experts.
 
-Search for:
+Look for:
 - Critical praise from recognized experts
 - Recognition from industry organizations
 - Expert testimonials
 
-For each source, provide:
-- [Article Title](complete URL)
-- Type of recognition""",
+Find {target_count} sources.""",
 
-        "7": f"""Find sources about {artist_name}'s salary/remuneration, and industry wage data for comparison.
+        "7": f"""Search Google for information about {artist_name}'s salary/remuneration and industry wage data.
 
-CRITICAL: For O-1 visa, we need to prove artist earns substantially above median.
+CRITICAL: Need both artist salary AND industry comparison data.
 
 Search for:
-1. Artist's salary/fees:
-   - Contract amounts
-   - Performance fees
-   - News articles mentioning compensation
-   
-2. Industry wage comparisons (ESSENTIAL):
-   - Bureau of Labor Statistics data: search "onetcenter.org musicians wages"
-   - BLS data: search "bls.gov occupational employment wages musicians"
-   - Union scales for comparison
+1. Artist's salary/fees (if available)
+2. Bureau of Labor Statistics data:
+   - "onetcenter.org musicians wages"
+   - "bls.gov occupational employment musicians"
+3. Union scales for comparison
 
-For each source, provide:
-- [Source Title](complete URL)
-- Wage/salary information
-- Whether it's artist-specific or industry comparison data
-
-IMPORTANT: Finding BLS comparison data is critical for this criterion.""",
+Find {target_count} sources including BLS data.""",
     }
     
-    return prompts.get(criterion_id, f"Find {target_count} sources about {artist_name} for: {criterion_desc}")
+    return prompts.get(criterion_id, f"Search for {target_count} sources about {artist_name} related to: {criterion_desc}")
 
 
-def _extract_search_results(response, criterion_desc: str) -> List[Dict]:
+def _extract_search_results(text: str, criterion_desc: str, response=None) -> List[Dict]:
     """
-    Extract search results from OpenAI response.
-    
-    The response contains the LLM's text with markdown links.
-    We extract URLs from the format: [Title](URL)
+    Extract URLs and metadata from Gemini's response.
     """
     
     results = []
     
-    try:
-        # Get the message content
-        message = response.choices[0].message
-        content = message.content or ""
+    # Try structured format first (---\nTITLE: ...\nURL: ...\n---)
+    structured_pattern = r'---\s*TITLE:\s*(.+?)\s*URL:\s*(https?://[^\s]+)\s*SOURCE:\s*(.+?)\s*EXCERPT:\s*(.+?)\s*---'
+    structured_matches = re.findall(structured_pattern, text, re.DOTALL | re.IGNORECASE)
+    
+    if structured_matches:
+        print(f"[Extract] Found {len(structured_matches)} structured results")
+        for title, url, source, excerpt in structured_matches:
+            results.append({
+                "url": url.strip(),
+                "title": title.strip(),
+                "source": source.strip(),
+                "relevance": f"Google Search for {criterion_desc[:50]}...",
+                "excerpt": excerpt.strip()[:300]
+            })
+    
+    # Fallback: Extract any URLs mentioned
+    if not results:
+        print("[Extract] No structured format, trying URL extraction...")
         
-        print(f"[Extract Results] Raw response length: {len(content)} chars")
+        # Find all URLs
+        url_pattern = r'https?://[^\s\)\]<>"]+'
+        urls = re.findall(url_pattern, text)
         
-        # Extract markdown links: [text](url)
-        # Pattern: [anything](http://url or https://url)
-        url_pattern = r'\[([^\]]+)\]\((https?://[^\)]+)\)'
-        matches = re.findall(url_pattern, content)
+        print(f"[Extract] Found {len(urls)} URLs in text")
         
-        print(f"[Extract Results] Found {len(matches)} markdown links")
-        
-        for title, url in matches:
-            # Clean up URL (remove trailing punctuation)
-            url = url.rstrip('.,;:!?)')
-            
-            # Extract excerpt (text after the link, up to next link or paragraph)
-            # This is a simple extraction - could be improved
-            excerpt_pattern = re.escape(f"[{title}]({url})") + r'\s*-?\s*([^[\n]+)'
-            excerpt_match = re.search(excerpt_pattern, content)
-            excerpt = excerpt_match.group(1).strip() if excerpt_match else ""
+        # For each URL, try to find context
+        for url in urls[:20]:  # Limit to 20 URLs
+            # Look for title near URL (within 200 chars before)
+            title_context = ""
+            url_index = text.find(url)
+            if url_index > 0:
+                context_start = max(0, url_index - 200)
+                context = text[context_start:url_index]
+                
+                # Try to extract title from context
+                # Look for quoted text or capitalized phrases
+                title_match = re.search(r'["""]([^"""]+)["""]', context)
+                if title_match:
+                    title_context = title_match.group(1)
+                else:
+                    # Look for the last sentence before URL
+                    sentences = re.split(r'[.!?]\s+', context)
+                    if sentences:
+                        title_context = sentences[-1].strip()
             
             results.append({
-                "url": url,
-                "title": title.strip(),
+                "url": url.strip(),
+                "title": title_context[:100] if title_context else _extract_source_from_url(url),
                 "source": _extract_source_from_url(url),
-                "relevance": f"ChatGPT search for {criterion_desc[:50]}...",
-                "excerpt": excerpt[:300] if excerpt else "Found via ChatGPT web search"
+                "relevance": f"Found via Google Search for {criterion_desc[:50]}...",
+                "excerpt": "Source found via Gemini's Google Search grounding"
             })
-        
-        # If no markdown links found, try to extract bare URLs
-        if not results:
-            print("[Extract Results] No markdown links, trying bare URLs")
-            bare_url_pattern = r'(https?://[^\s\)]+)'
-            bare_urls = re.findall(bare_url_pattern, content)
-            
-            for url in bare_urls[:10]:  # Limit to 10 bare URLs
-                url = url.rstrip('.,;:!?)')
-                results.append({
-                    "url": url,
-                    "title": _extract_source_from_url(url),
-                    "source": _extract_source_from_url(url),
-                    "relevance": f"Found for {criterion_desc[:50]}...",
-                    "excerpt": "Source found via ChatGPT web search"
-                })
-        
-        return results
-        
-    except Exception as e:
-        print(f"[Extract Results] Error: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
+    
+    # Try to extract grounding metadata if available
+    if response and hasattr(response, 'candidates'):
+        try:
+            for candidate in response.candidates:
+                if hasattr(candidate, 'grounding_metadata'):
+                    metadata = candidate.grounding_metadata
+                    if hasattr(metadata, 'grounding_chunks'):
+                        print(f"[Extract] Found {len(metadata.grounding_chunks)} grounding chunks")
+                        for chunk in metadata.grounding_chunks:
+                            if hasattr(chunk, 'web') and hasattr(chunk.web, 'uri'):
+                                # Check if we already have this URL
+                                if not any(r['url'] == chunk.web.uri for r in results):
+                                    results.append({
+                                        "url": chunk.web.uri,
+                                        "title": getattr(chunk.web, 'title', _extract_source_from_url(chunk.web.uri)),
+                                        "source": _extract_source_from_url(chunk.web.uri),
+                                        "relevance": f"Grounding source for {criterion_desc[:50]}...",
+                                        "excerpt": "Source from Gemini's grounding metadata"
+                                    })
+        except Exception as e:
+            print(f"[Extract] Error extracting grounding metadata: {e}")
+    
+    # Remove duplicates
+    seen_urls = set()
+    unique_results = []
+    for r in results:
+        if r['url'] not in seen_urls:
+            seen_urls.add(r['url'])
+            unique_results.append(r)
+    
+    return unique_results
 
 
 def _extract_source_from_url(url: str) -> str:
@@ -361,10 +363,6 @@ def _extract_source_from_url(url: str) -> str:
         return "Unknown Source"
 
 
-# ============================================================
-# Main Research Function
-# ============================================================
-
 def ai_search_for_evidence(
     artist_name: str,
     name_variants: List[str],
@@ -374,20 +372,25 @@ def ai_search_for_evidence(
     artist_field: Optional[str] = None,
 ) -> Dict[str, List[Dict]]:
     """
-    ChatGPT-style research using OpenAI's native web search.
+    Research using Gemini's Google Search grounding.
     
-    This uses the SAME search tool ChatGPT uses.
+    Setup:
+    - Get API key: https://aistudio.google.com/app/apikey
+    - Add to secrets: GEMINI_API_KEY = "your-key-here"
+    - Install library: pip install google-generativeai
     
-    Setup required:
-    - OPENAI_API_KEY in environment or Streamlit secrets
-    - That's it! No agent setup needed.
-    
-    Cost: ~$2-3 per application
-    - Web search: $10/1000 calls (7 criteria = $0.07)
-    - LLM costs: ~$2-3 depending on model
-    
-    Quality: ChatGPT-level
+    Cost: ~$1-2 per application
+    Quality: Google Search level (very good)
     """
+    
+    print(f"\n{'='*60}")
+    print("GEMINI GOOGLE SEARCH - AI RESEARCH")
+    print(f"{'='*60}")
+    print(f"Artist: {artist_name}")
+    print(f"Variants: {name_variants}")
+    print(f"Criteria: {selected_criteria}")
+    print(f"Field: {artist_field}")
+    print(f"{'='*60}\n")
     
     results_by_criterion = {}
     
@@ -395,17 +398,17 @@ def ai_search_for_evidence(
         try:
             criterion_desc = criteria_descriptions.get(cid, "")
             if not criterion_desc:
-                print(f"[Criterion {cid}] No description, skipping")
+                print(f"[Warning] No description for criterion {cid}, skipping")
                 continue
             
             print(f"\n{'='*60}")
-            print(f"[Criterion {cid}] {criterion_desc}")
+            print(f"Searching: Criterion {cid} - {criterion_desc}")
             print(f"{'='*60}")
             
             target = TARGET_RESULTS.get(cid, 5)
             
-            # Use ChatGPT's web search
-            results = _search_with_chatgpt(
+            # Search with Gemini
+            results = _search_with_gemini(
                 cid,
                 criterion_desc,
                 artist_name,
@@ -414,25 +417,31 @@ def ai_search_for_evidence(
             
             if results:
                 results_by_criterion[cid] = results
-                print(f"[Criterion {cid}] Returning {len(results)} results")
+                print(f"[Success] Criterion {cid}: {len(results)} results")
             else:
-                print(f"[Criterion {cid}] No results found - ChatGPT may not have found relevant sources")
+                print(f"[Warning] Criterion {cid}: No results found")
             
         except Exception as e:
-            print(f"[Criterion {cid}] Error: {e}")
+            print(f"[Error] Criterion {cid} failed: {e}")
             import traceback
             traceback.print_exc()
             continue
+    
+    print(f"\n{'='*60}")
+    print("SEARCH COMPLETE")
+    print(f"Criteria searched: {len(selected_criteria)}")
+    print(f"Criteria with results: {len(results_by_criterion)}")
+    print(f"{'='*60}\n")
     
     if not results_by_criterion:
         raise RuntimeError(
             "No results found for any criterion.\n\n"
             "Possible causes:\n"
-            "1. OPENAI_API_KEY not set or invalid\n"
+            "1. GEMINI_API_KEY not set or invalid\n"
+            "   Get one at: https://aistudio.google.com/app/apikey\n"
             "2. Artist name may be misspelled or have limited online presence\n"
-            "3. Web search API may be temporarily unavailable\n"
-            "4. Check Streamlit logs for detailed error messages\n\n"
-            "Try searching manually in ChatGPT first to verify the artist has findable sources."
+            "3. Try searching manually in Google first to verify sources exist\n"
+            "4. Check Streamlit logs for detailed error messages"
         )
     
     return results_by_criterion
