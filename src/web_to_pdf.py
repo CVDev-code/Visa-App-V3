@@ -28,6 +28,11 @@ def _detect_and_translate_content(content: str, html_content: str = "") -> Tuple
     """
     Detect language and translate to English if needed.
     
+    Supports multiple translation libraries with fallback:
+    1. deep-translator (more reliable)
+    2. googletrans (fallback)
+    3. None (graceful degradation)
+    
     Args:
         content: Text content to check/translate
         html_content: Optional HTML for better language detection
@@ -37,56 +42,93 @@ def _detect_and_translate_content(content: str, html_content: str = "") -> Tuple
     """
     try:
         from langdetect import detect, LangDetectException
-        from googletrans import Translator
+    except ImportError:
+        print("[Translation] langdetect not installed - translation disabled")
+        print("[Translation] Install with: pip install langdetect")
+        return content, False
+    
+    # Detect language
+    detection_text = (html_content[:2000] if html_content else content[:2000]).strip()
+    
+    if not detection_text:
+        return content, False
+    
+    try:
+        detected_lang = detect(detection_text)
+    except LangDetectException:
+        # If detection fails, assume English
+        return content, False
+    
+    print(f"[Translation] Detected language: {detected_lang}")
+    
+    # If already English, no translation needed
+    if detected_lang == 'en':
+        return content, False
+    
+    # Try deep-translator first (more reliable)
+    try:
+        from deep_translator import GoogleTranslator
         
-        # Use HTML if available for better detection, otherwise use content
-        detection_text = (html_content[:2000] if html_content else content[:2000]).strip()
+        print(f"[Translation] Using deep-translator to translate from {detected_lang} to English...")
         
-        if not detection_text:
-            return content, False
-        
-        try:
-            detected_lang = detect(detection_text)
-        except LangDetectException:
-            # If detection fails, assume English
-            return content, False
-        
-        print(f"[Translation] Detected language: {detected_lang}")
-        
-        # If already English, no translation needed
-        if detected_lang == 'en':
-            return content, False
-        
-        # Translate to English
-        print(f"[Translation] Translating from {detected_lang} to English...")
-        translator = Translator()
-        
-        # Split into chunks (Google Translate has length limits)
+        # Split into chunks (API has length limits)
         max_chunk_size = 4000
         chunks = [content[i:i+max_chunk_size] for i in range(0, len(content), max_chunk_size)]
         
         translated_chunks = []
+        translator = GoogleTranslator(source=detected_lang, target='en')
+        
         for i, chunk in enumerate(chunks):
             print(f"[Translation] Translating chunk {i+1}/{len(chunks)}...")
             try:
-                result = translator.translate(chunk, src=detected_lang, dest='en')
-                translated_chunks.append(result.text)
+                result = translator.translate(chunk)
+                translated_chunks.append(result)
             except Exception as e:
                 print(f"[Translation] Error translating chunk {i+1}: {e}")
                 translated_chunks.append(chunk)  # Keep original if translation fails
         
         translated_content = '\n'.join(translated_chunks)
-        print(f"[Translation] Successfully translated {len(chunks)} chunks")
+        print(f"[Translation] Successfully translated {len(chunks)} chunks with deep-translator")
         
         return translated_content, True
         
     except ImportError:
-        print("[Translation] Translation libraries not installed (googletrans, langdetect)")
-        print("[Translation] Install with: pip install googletrans==4.0.0rc1 langdetect")
-        return content, False
+        print("[Translation] deep-translator not installed, trying googletrans...")
         
+        # Fallback to googletrans
+        try:
+            from googletrans import Translator
+            
+            print(f"[Translation] Using googletrans to translate from {detected_lang} to English...")
+            translator = Translator()
+            
+            # Split into chunks
+            max_chunk_size = 4000
+            chunks = [content[i:i+max_chunk_size] for i in range(0, len(content), max_chunk_size)]
+            
+            translated_chunks = []
+            for i, chunk in enumerate(chunks):
+                print(f"[Translation] Translating chunk {i+1}/{len(chunks)}...")
+                try:
+                    result = translator.translate(chunk, src=detected_lang, dest='en')
+                    translated_chunks.append(result.text)
+                except Exception as e:
+                    print(f"[Translation] Error translating chunk {i+1}: {e}")
+                    translated_chunks.append(chunk)
+            
+            translated_content = '\n'.join(translated_chunks)
+            print(f"[Translation] Successfully translated {len(chunks)} chunks with googletrans")
+            
+            return translated_content, True
+            
+        except ImportError:
+            print("[Translation] No translation libraries installed")
+            print("[Translation] Install with: pip install deep-translator langdetect")
+            print("[Translation] OR: pip install googletrans==4.0.0rc1 langdetect")
+            return content, False
+    
     except Exception as e:
-        print(f"[Translation] Error during translation: {e}")
+        print(f"[Translation] Translation failed: {e}")
         import traceback
         traceback.print_exc()
         return content, False
