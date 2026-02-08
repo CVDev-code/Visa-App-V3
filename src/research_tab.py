@@ -200,15 +200,40 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
             source = item.get('source', 'Unknown')
             excerpt = item.get('excerpt', '')
             
-            is_approved = approvals.get(url, True)
+            # Get filename for skip_highlighting tracking
+            if url.startswith('upload://'):
+                filename = url.replace('upload://', '')
+            else:
+                filename = title
+            
+            # Read approval state directly from session state (not local variable)
+            is_approved = st.session_state.research_approvals[cid].get(url, True)
+            
+            # Initialize skip_highlighting if needed
+            if cid not in st.session_state.skip_highlighting:
+                st.session_state.skip_highlighting[cid] = {}
+            skip_highlight = st.session_state.skip_highlighting[cid].get(filename, False)
             
             # Checkbox for approval
-            new_approval = st.checkbox(
-                f"**[{source}]** {title}",
-                value=is_approved,
-                key=f"approve_{cid}_{i}"
-            )
-            st.session_state.research_approvals[cid][url] = new_approval
+            col_approve, col_skip = st.columns([3, 1])
+            
+            with col_approve:
+                new_approval = st.checkbox(
+                    f"**[{source}]** {title}",
+                    value=is_approved,
+                    key=f"approve_{cid}_{i}"
+                )
+                st.session_state.research_approvals[cid][url] = new_approval
+            
+            with col_skip:
+                if is_approved:  # Only show skip option if approved
+                    new_skip = st.checkbox(
+                        "Skip highlighting",
+                        value=skip_highlight,
+                        key=f"skip_{cid}_{i}",
+                        help="Include in export as-is without highlighting"
+                    )
+                    st.session_state.skip_highlighting[cid][filename] = new_skip
             
             # Show excerpt and URL
             if excerpt:
@@ -316,9 +341,14 @@ def convert_approved_to_pdfs():
     # Separate uploads from URLs
     for cid, results in st.session_state.research_results.items():
         approvals = st.session_state.research_approvals.get(cid, {})
+        skip_flags = st.session_state.skip_highlighting.get(cid, {})
         
         if cid not in st.session_state.criterion_pdfs:
             st.session_state.criterion_pdfs[cid] = {}
+        
+        # Track which PDFs should skip highlighting
+        if cid not in st.session_state.highlight_results:
+            st.session_state.highlight_results[cid] = {}
         
         # Process each approved result
         urls_to_convert = []
@@ -329,19 +359,39 @@ def convert_approved_to_pdfs():
             if not approvals.get(url, False):
                 continue  # Skip rejected
             
+            # Determine filename
+            if url.startswith('upload://'):
+                filename = url.replace('upload://', '')
+            else:
+                filename = item.get('title', 'source') + '.pdf'
+            
+            # Check if this should skip highlighting
+            should_skip = skip_flags.get(filename, False)
+            
             # Check if upload
             if url.startswith('upload://'):
                 # Already have PDF bytes
-                filename = url.replace('upload://', '')
-                st.session_state.criterion_pdfs[cid][filename] = item['pdf_bytes']
+                pdf_bytes = item['pdf_bytes']
+                st.session_state.criterion_pdfs[cid][filename] = pdf_bytes
+                
+                # If skip highlighting, mark it in highlight_results (bypasses AI analysis)
+                if should_skip:
+                    st.session_state.highlight_results[cid][filename] = {
+                        'quotes': {},
+                        'notes': 'Document marked to skip highlighting - included as-is',
+                        'pdf_bytes': pdf_bytes,
+                        'skip_highlighting': True
+                    }
             else:
-                # URL to convert
+                # URL to convert - ALL URLs need to be converted to PDF
                 urls_to_convert.append({
                     'url': url,
-                    'title': item.get('title', 'source')
+                    'title': item.get('title', 'source'),
+                    'filename': filename,
+                    'skip_highlighting': should_skip  # Track skip flag for later
                 })
         
-        # Convert URLs
+        # Convert URLs to PDFs
         if urls_to_convert:
             try:
                 pdfs = batch_convert_urls_to_pdfs(
@@ -350,15 +400,37 @@ def convert_approved_to_pdfs():
                 )
                 
                 if cid in pdfs:
-                    st.session_state.criterion_pdfs[cid].update(pdfs[cid])
+                    for filename, pdf_bytes in pdfs[cid].items():
+                        # Store the PDF
+                        st.session_state.criterion_pdfs[cid][filename] = pdf_bytes
+                        
+                        # Find if this should skip highlighting
+                        url_item = next((u for u in urls_to_convert if u.get('filename') == filename), None)
+                        if url_item and url_item.get('skip_highlighting', False):
+                            # Mark to skip AI analysis and annotation
+                            st.session_state.highlight_results[cid][filename] = {
+                                'quotes': {},
+                                'notes': 'Document marked to skip highlighting - included as-is',
+                                'pdf_bytes': pdf_bytes,
+                                'skip_highlighting': True
+                            }
             
             except Exception as e:
                 st.error(f"Error converting criterion {cid}: {str(e)}")
     
     total_pdfs = sum(len(pdfs) for pdfs in st.session_state.criterion_pdfs.values())
+    skipped_count = sum(
+        1 for cid_data in st.session_state.highlight_results.values()
+        for doc_data in cid_data.values()
+        if doc_data.get('skip_highlighting', False)
+    )
+    highlight_count = total_pdfs - skipped_count
     
-    st.success(f"""
-    ✅ Processed {total_pdfs} PDFs!
+    msg = f"✅ Processed {total_pdfs} PDFs!\n\n"
+    if skipped_count > 0:
+        msg += f"📄 {highlight_count} will be highlighted\n"
+        msg += f"🔒 {skipped_count} marked to skip highlighting (will be included as-is)\n\n"
     
-    **Go to the Highlight & Export tab** to continue →
-    """)
+    msg += "**Go to the Highlight & Export tab** to continue →"
+    
+    st.success(msg)
