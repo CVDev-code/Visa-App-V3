@@ -1,10 +1,12 @@
 import io
 import math
+import os
 import re
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
 
 import fitz  # PyMuPDF
+from openai import OpenAI
 
 RED = (1, 0, 0)
 WHITE = (1, 1, 1)
@@ -113,6 +115,62 @@ def get_date_label(performance_date_str: str, current_date: Optional[datetime] =
     else:
         # Same day - treat as current
         return "Performance date."
+
+
+def _get_secret(name: str):
+    """
+    Works on Streamlit Cloud (st.secrets) and locally (.env / env vars).
+    """
+    try:
+        import streamlit as st  # noqa: F401
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.getenv(name)
+
+
+def _summarize_positive_description(quote_term: str) -> Optional[str]:
+    """
+    Use the LLM to produce a 1-3 word positive description.
+    Returns None if the model is unavailable or fails.
+    """
+    if not quote_term or not quote_term.strip():
+        return None
+
+    api_key = _get_secret("OPENAI_API_KEY")
+    if not api_key:
+        return None
+
+    model = _get_secret("OPENAI_MODEL") or "gpt-4o-mini"
+    client = OpenAI(api_key=api_key)
+
+    system_prompt = (
+        "You summarize praise in arts reviews. Return ONLY 1 to 3 words, "
+        "no punctuation, no quotes, no extra text."
+    )
+    user_prompt = f"Quote:\n{quote_term.strip()}\n\nReturn 1-3 words."
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+    except Exception:
+        return None
+
+    cleaned = re.sub(r"[\"'`.,;:!?\(\)\[\]\{\}]+", " ", raw)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return None
+
+    words = cleaned.split(" ")
+    cleaned = " ".join(words[:3])
+    return cleaned if cleaned else None
 
 
 # ============================================================
@@ -717,44 +775,37 @@ def annotate_pdf_bytes(
     
     ANNOTATION LABEL MAPPING:
     ========================
-    
-    STANDARD METADATA ANNOTATIONS (all criteria):
-    --------------------------------------------
-    1. "Original source of publication." 
-       - Maps to: meta["source_url"]
-       - Appears for any URL/publication source
-    
-    2. "Distinguished organization."
-       - Maps to: meta["venue_name"]
-       - Appears for performance venues
-    
-    3. "Distinguished organization."
-       - Maps to: meta["ensemble_name"]
-       - Appears for performing groups
-    
-    4. "Performance date." / "Past performance date." / "Future performance date."
-       - Maps to: meta["performance_date"]
-       - Label text changes based on date comparison with current_date
-       - "Past performance date." if date is before current_date
-       - "Future performance date." if date is after current_date
-       - "Performance date." if date cannot be parsed or is today
-    
-    5. "Beneficiary in lead role."
-       - Maps to: meta["beneficiary_name"] + meta["beneficiary_variants"]
-       - Appears for the person being evaluated
-    
-    CRITERION-SPECIFIC ANNOTATIONS (for quote_terms):
-    ------------------------------------------------
-    Criterion 1: "Beneficiary awarded significant industry award."
-    Criterion 2: "Beneficiary named in lead role." (past or future based on performance_date)
-    Criterion 3: "Beneficiary received significant international acclaim."
-    Criterion 4: "Beneficiary named in lead role at distinguished organisation." (past or future)
-    Criterion 5: "Achievement received major critical acclaim."
-    Criterion 6: "Recognition from leading organization / expert."
-    Criterion 7: No criterion-specific annotation (only standard metadata)
-    
-    NOTE: quote_terms now get BOTH red boxes AND a criterion-specific annotation.
-    The first quote_term gets the criterion-specific annotation label.
+    Criterion 1:
+      - "Original source of publication." -> meta["source_url"]
+      - "Award issuer." -> meta["venue_name"]
+      - Quote annotation: "Beneficiary receives award."
+
+    Criterion 2:
+      - "Original source of publication." -> meta["source_url"]
+      - "past performance" or "future performance" -> meta["performance_date"]
+
+    Criterion 3:
+      - "Original source of publication." -> meta["source_url"]
+      - Quote annotation: "Beneficiary's performance described as {1-3 words}"
+
+    Criterion 4:
+      - "Original source of publication." -> meta["source_url"]
+      - "Distinguished organization." -> meta["venue_name"]
+      - "Distinguished organization." -> meta["ensemble_name"]
+      - "past performance" or "future performance" -> meta["performance_date"]
+
+    Criterion 5:
+      - "Original source of publication." -> meta["source_url"]
+      - Quote annotation: "Beneficiary's successes are critically acclaimed"
+
+    Criterion 6:
+      - "Original source of publication." -> meta["source_url"]
+      - Quote annotation: "Beneficiary's achievements received recognition from industry experts"
+
+    Criterion 7:
+      - "Original source of publication." -> meta["source_url"]
+
+    NOTE: quote_terms get red boxes; the first quote_term gets the quote annotation.
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     if len(doc) == 0:
@@ -950,45 +1001,23 @@ def annotate_pdf_bytes(
     # Determine the criterion-specific label based on criterion_id
     criterion_label = None
     performance_date_str = meta.get("performance_date")
-    
-    # Normalize criterion_id (handle both "criterion-1", "criterion_1", "1", etc.)
-    criterion_num = None
-    if criterion_id:
-        criterion_str = str(criterion_id).lower().replace("criterion-", "").replace("criterion_", "").replace("criterion", "").strip()
-        try:
-            criterion_num = int(criterion_str)
-        except (ValueError, TypeError):
-            pass
-    
+
+    criterion_str = str(criterion_id or "").lower().strip()
+    criterion_category = "past" if "past" in criterion_str else "future" if "future" in criterion_str else None
+    criterion_match = re.search(r"\d+", criterion_str)
+    criterion_num = int(criterion_match.group(0)) if criterion_match else None
+
     if criterion_num == 1:
-        criterion_label = "Beneficiary awarded significant industry award."
-    elif criterion_num == 2:
-        # Check if past or future based on performance date
-        if performance_date_str:
-            perf_date = parse_date(performance_date_str)
-            if perf_date and perf_date.date() < datetime.now().date():
-                criterion_label = "Beneficiary named in lead role."
-            else:
-                criterion_label = "Beneficiary named in lead role."
-        else:
-            criterion_label = "Beneficiary named in lead role."
+        criterion_label = "Beneficiary receives award."
     elif criterion_num == 3:
-        criterion_label = "Beneficiary received significant international acclaim."
-    elif criterion_num == 4:
-        # Check if past or future based on performance date
-        if performance_date_str:
-            perf_date = parse_date(performance_date_str)
-            if perf_date and perf_date.date() < datetime.now().date():
-                criterion_label = "Beneficiary named in lead role at distinguished organisation."
-            else:
-                criterion_label = "Beneficiary named in lead role at distinguished organisation."
-        else:
-            criterion_label = "Beneficiary named in lead role at distinguished organisation."
+        summary = _summarize_positive_description(first_quote_term or "")
+        summary_text = summary or "exceptional"
+        criterion_label = f"Beneficiary's performance described as {summary_text}"
     elif criterion_num == 5:
-        criterion_label = "Achievement received major critical acclaim."
+        criterion_label = "Beneficiary's successes are critically acclaimed"
     elif criterion_num == 6:
-        criterion_label = "Recognition from leading organization / expert."
-    # Criterion 7 gets no criterion-specific annotation
+        criterion_label = "Beneficiary's achievements received recognition from industry experts"
+    # Criteria 2, 4, 7 get no quote-term annotation
     
     # Apply criterion-specific annotation to first quote term if we have one
     if criterion_label and first_quote_targets_by_page:
@@ -1062,7 +1091,7 @@ def annotate_pdf_bytes(
                     }
                 )
 
-    # --- Meta labels (standard metadata annotations) ---
+    # --- Meta labels (criterion-specific metadata annotations) ---
     # For source_url, try multiple variants (with/without protocol, with/without www)
     source_url = meta.get("source_url")
     source_url_variants = []
@@ -1076,28 +1105,39 @@ def annotate_pdf_bytes(
             without_www = without_protocol.replace('www.', '', 1)
             source_url_variants.append(without_www)
     
-    _do_job("Original source of publication.", source_url, 
-            connect_policy="all", also_try_variants=source_url_variants)
-    _do_job("Distinguished organization.", meta.get("venue_name"), connect_policy="all")
-    _do_job("Distinguished organization.", meta.get("ensemble_name"), connect_policy="all")
-    
-    # Performance date with smart past/future detection
-    # IMPORTANT: Pass current_date parameter to enable past/future detection
-    # Example: annotate_pdf_bytes(..., current_date=datetime.now())
-    performance_date_str = meta.get("performance_date")
-    if performance_date_str:
-        # If current_date is None, use datetime.now() by default
-        effective_current_date = current_date if current_date is not None else datetime.now()
-        date_label = get_date_label(performance_date_str, effective_current_date)
-        _do_job(date_label, performance_date_str, connect_policy="all")
+    if criterion_num in {1, 2, 3, 4, 5, 6, 7}:
+        _do_job(
+            "Original source of publication.",
+            source_url,
+            connect_policy="all",
+            also_try_variants=source_url_variants,
+        )
 
-    # Beneficiary targets (still value-driven)
-    _do_job(
-        "Beneficiary in lead role.",
-        meta.get("beneficiary_name"),
-        connect_policy="all",
-        also_try_variants=meta.get("beneficiary_variants") or [],
-    )
+    if criterion_num == 1:
+        _do_job("Award issuer.", meta.get("venue_name"), connect_policy="all")
+
+    if criterion_num == 4:
+        _do_job("Distinguished organization.", meta.get("venue_name"), connect_policy="all")
+        _do_job("Distinguished organization.", meta.get("ensemble_name"), connect_policy="all")
+
+    if criterion_num in {2, 4}:
+        performance_date_str = meta.get("performance_date")
+        if performance_date_str:
+            if criterion_category == "past":
+                date_label = "past performance"
+            elif criterion_category == "future":
+                date_label = "future performance"
+            else:
+                effective_current_date = current_date if current_date is not None else datetime.now()
+                perf_date = parse_date(performance_date_str)
+                if perf_date and perf_date.date() < effective_current_date.date():
+                    date_label = "past performance"
+                elif perf_date and perf_date.date() > effective_current_date.date():
+                    date_label = "future performance"
+                else:
+                    date_label = None
+            if date_label:
+                _do_job(date_label, performance_date_str, connect_policy="all")
 
     # Second pass: draw connectors AFTER all callouts exist
     for item in connectors_to_draw:
