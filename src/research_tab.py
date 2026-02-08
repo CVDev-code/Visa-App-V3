@@ -209,7 +209,7 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
             # Read approval state directly from session state (not local variable)
             is_approved = st.session_state.research_approvals[cid].get(url, True)
             
-            # Initialize skip_highlighting if needed
+            # Initialize skip_highlighting for this criterion if needed
             if cid not in st.session_state.skip_highlighting:
                 st.session_state.skip_highlighting[cid] = {}
             skip_highlight = st.session_state.skip_highlighting[cid].get(filename, False)
