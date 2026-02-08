@@ -16,6 +16,7 @@ IMPROVEMENTS v14:
 """
 
 import io
+import os
 from typing import Dict, Optional, Tuple, List
 from datetime import datetime
 
@@ -154,6 +155,11 @@ def fetch_webpage_content(url: str, translate_to_english: bool = True) -> Dict[s
             "raw_html": "Full HTML (for debugging)"
         }
     """
+    # Handle direct PDF URLs by extracting text and re-wrapping
+    pdf_result = _try_fetch_pdf_content(url, translate_to_english=translate_to_english)
+    if pdf_result:
+        return pdf_result
+
     # Try newspaper3k first (best for news/article sites)
     try:
         from newspaper import Article
@@ -345,6 +351,63 @@ def fetch_webpage_content(url: str, translate_to_english: bool = True) -> Dict[s
         except Exception as e2:
             raise RuntimeError(f"Failed to fetch {url}: {e2}")
 
+
+def _try_fetch_pdf_content(url: str, translate_to_english: bool = True) -> Optional[Dict[str, str]]:
+    """
+    Detect a PDF URL and extract text for consistent PDF output.
+    
+    Returns None if the URL does not appear to be a PDF.
+    """
+    url_lower = url.lower()
+    is_pdf_url = url_lower.endswith(".pdf")
+    
+    try:
+        import requests
+        
+        # Quick content-type check for non-.pdf URLs
+        if not is_pdf_url:
+            head = requests.head(url, timeout=10, allow_redirects=True, headers={
+                'User-Agent': 'Mozilla/5.0 (compatible; O1VisaBot/1.0)'
+            })
+            content_type = head.headers.get("Content-Type", "").lower()
+            if "application/pdf" not in content_type:
+                return None
+        
+        # Download PDF bytes
+        response = requests.get(url, timeout=20, headers={
+            'User-Agent': 'Mozilla/5.0 (compatible; O1VisaBot/1.0)'
+        })
+        response.raise_for_status()
+        pdf_bytes = response.content
+        
+        # Extract text from PDF
+        from src.pdf_text import extract_text_from_pdf_bytes
+        content = extract_text_from_pdf_bytes(pdf_bytes) or ""
+        
+        # Translate if needed
+        if translate_to_english and content:
+            content, was_translated = _detect_and_translate_content(content, "")
+            if was_translated:
+                print(f"[Translation] PDF content translated to English")
+        
+        # Title from filename or URL
+        filename = os.path.basename(url.split("?")[0])
+        title = filename if filename else "Untitled"
+        
+        return {
+            "title": title,
+            "author": "",
+            "date": "",
+            "content": content,
+            "url": url,
+            "publication_logo": None,
+            "footer_logo": None,
+            "font_family": "Arial, Helvetica, sans-serif",
+            "raw_html": ""
+        }
+    except Exception as e:
+        print(f"[PDF fetch failed] {e}")
+        return None
 
 def _extract_publication_logo(soup, url: str) -> Optional[str]:
     """
