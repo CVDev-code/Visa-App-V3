@@ -74,7 +74,10 @@ def render_criterion_highlights(cid: str):
     
     status = f"({len(pdfs)} PDFs, {highlighted_count} highlighted, {total_quotes} quotes)" if highlights else f"({len(pdfs)} PDFs)"
     
-    with st.expander(f"📋 **Criterion ({cid}):** {desc} {status}", expanded=highlighted_count == 0):
+    # Default to collapsed UNLESS there are highlights (to keep it open during interaction)
+    is_expanded = highlighted_count > 0
+    
+    with st.expander(f"📋 **Criterion ({cid}):** {desc} {status}", expanded=is_expanded):
         
         # Highlight button for this criterion
         col1, col2 = st.columns([2, 1])
@@ -108,24 +111,32 @@ def render_criterion_highlights(cid: str):
         col1, col2 = st.columns(2)
         with col1:
             if st.button("✅ Approve All Quotes", key=f"approve_all_quotes_{cid}"):
+                # Initialize if needed
+                if cid not in st.session_state.highlight_approvals:
+                    st.session_state.highlight_approvals[cid] = {}
+                
                 for filename, data in highlights.items():
-                    if filename not in criterion_approvals:
-                        criterion_approvals[filename] = {}
+                    if filename not in st.session_state.highlight_approvals[cid]:
+                        st.session_state.highlight_approvals[cid][filename] = {}
                     for criterion_id, quotes in data.get('quotes', {}).items():
                         for quote in quotes:
                             quote_key = quote['quote'][:100]  # Use first 100 chars as key
-                            criterion_approvals[filename][quote_key] = True
+                            st.session_state.highlight_approvals[cid][filename][quote_key] = True
                 st.rerun()
         
         with col2:
             if st.button("❌ Reject All Quotes", key=f"reject_all_quotes_{cid}"):
+                # Initialize if needed
+                if cid not in st.session_state.highlight_approvals:
+                    st.session_state.highlight_approvals[cid] = {}
+                
                 for filename, data in highlights.items():
-                    if filename not in criterion_approvals:
-                        criterion_approvals[filename] = {}
+                    if filename not in st.session_state.highlight_approvals[cid]:
+                        st.session_state.highlight_approvals[cid][filename] = {}
                     for criterion_id, quotes in data.get('quotes', {}).items():
                         for quote in quotes:
                             quote_key = quote['quote'][:100]
-                            criterion_approvals[filename][quote_key] = False
+                            st.session_state.highlight_approvals[cid][filename][quote_key] = False
                 st.rerun()
         
         st.markdown("---")
