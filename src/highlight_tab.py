@@ -382,13 +382,15 @@ def render_export_section():
 
 
 def generate_export_zip(package_name: str) -> bytes:
-    """Generate ZIP with criterion subfolders"""
+    """Generate ZIP with criterion subfolders and ANNOTATED PDFs"""
+    
+    from src.pdf_highlighter import annotate_pdf_bytes
     
     zip_buffer = io.BytesIO()
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         
-        # Add PDFs organized by criterion
+        # Add annotated PDFs organized by criterion
         for cid, highlights in st.session_state.highlight_results.items():
             
             # Create folder name
@@ -397,10 +399,56 @@ def generate_export_zip(package_name: str) -> bytes:
             
             for filename, data in highlights.items():
                 pdf_bytes = data['pdf_bytes']
+                quotes_dict = data.get('quotes', {})
                 
-                # Add to ZIP in criterion subfolder
-                zip_path = f"{package_name}/{folder_name}/{filename}"
-                zip_file.writestr(zip_path, pdf_bytes)
+                # Get approved quotes only
+                approved_quotes = []
+                if cid in st.session_state.highlight_approvals:
+                    if filename in st.session_state.highlight_approvals[cid]:
+                        file_approvals = st.session_state.highlight_approvals[cid][filename]
+                        
+                        # Collect all approved quotes from all criteria
+                        for criterion_id, quote_list in quotes_dict.items():
+                            for quote_data in quote_list:
+                                quote_text = quote_data.get('quote', '')
+                                quote_key = quote_text[:100]
+                                
+                                if file_approvals.get(quote_key, True):  # Default approve
+                                    approved_quotes.append(quote_text)
+                
+                # If no approvals tracked, use all quotes
+                if not approved_quotes:
+                    for criterion_id, quote_list in quotes_dict.items():
+                        for quote_data in quote_list:
+                            approved_quotes.append(quote_data.get('quote', ''))
+                
+                # Annotate PDF with approved quotes
+                try:
+                    meta = {
+                        "source_url": "",
+                        "venue_name": "",
+                        "ensemble_name": "",
+                        "performance_date": "",
+                        "beneficiary_name": st.session_state.beneficiary_name,
+                        "beneficiary_variants": st.session_state.beneficiary_variants,
+                    }
+                    
+                    annotated_pdf, stats = annotate_pdf_bytes(
+                        pdf_bytes=pdf_bytes,
+                        quote_terms=approved_quotes,
+                        criterion_id=cid,
+                        meta=meta
+                    )
+                    
+                    # Add annotated PDF to ZIP
+                    zip_path = f"{package_name}/{folder_name}/{filename}"
+                    zip_file.writestr(zip_path, annotated_pdf)
+                
+                except Exception as e:
+                    # If annotation fails, use original PDF
+                    st.warning(f"Could not annotate {filename}: {str(e)}")
+                    zip_path = f"{package_name}/{folder_name}/{filename}"
+                    zip_file.writestr(zip_path, pdf_bytes)
         
         # Add README
         readme = generate_readme(package_name)
