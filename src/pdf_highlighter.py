@@ -26,8 +26,8 @@ NO_GO_RECT = fitz.Rect(
 )
 
 # ---- spacing knobs ----
-EDGE_PAD = 28.0  # Increased from 12.0 to give more margin space
-GAP_FROM_TEXT_BLOCKS = 22.0  # Increased from 8.0 for better annotation spacing
+EDGE_PAD = 18.0  # Distance from page edge for annotations
+GAP_FROM_TEXT_BLOCKS = 24.0  # Gap between text block and annotations
 GAP_FROM_HIGHLIGHTS = 10.0
 GAP_BETWEEN_CALLOUTS = 8.0
 ENDPOINT_PULLBACK = 1.5
@@ -574,29 +574,18 @@ def _edge_to_edge_points(r1: fitz.Rect, r2: fitz.Rect) -> Tuple[fitz.Point, fitz
     dx = c2.x - c1.x
     dy = c2.y - c1.y
 
-    # Prefer horizontal connections when annotations are in margins
-    # This creates cleaner L-shaped lines
-    
-    # Check if r1 is in left margin and r2 is in content area
-    page_center_x = 306  # Approximate center of typical page (612pt wide)
-    r1_in_left_margin = r1.x1 < page_center_x * 0.4
-    r1_in_right_margin = r1.x0 > page_center_x * 1.6
-    r2_in_content = page_center_x * 0.3 < c2.x < page_center_x * 1.7
-    
-    if r1_in_left_margin and r2_in_content:
-        # Annotation on left, target in content
-        # Connect from right edge of annotation to left edge of target
+    # Prefer connecting to the closest horizontal edge of the target
+    if r1.x1 <= r2.x0:
+        # Annotation left of target
         p1 = fitz.Point(r1.x1, c1.y)
         p2 = fitz.Point(r2.x0, c2.y)
-    elif r1_in_right_margin and r2_in_content:
-        # Annotation on right, target in content  
-        # Connect from left edge of annotation to right edge of target
+    elif r1.x0 >= r2.x1:
+        # Annotation right of target
         p1 = fitz.Point(r1.x0, c1.y)
         p2 = fitz.Point(r2.x1, c2.y)
     else:
-        # Default behavior: use dominant direction
+        # Overlapping in x; fall back to dominant direction
         if abs(dx) > abs(dy):
-            # Horizontal dominant
             if dx > 0:
                 p1 = fitz.Point(r1.x1, c1.y)
                 p2 = fitz.Point(r2.x0, c2.y)
@@ -604,7 +593,6 @@ def _edge_to_edge_points(r1: fitz.Rect, r2: fitz.Rect) -> Tuple[fitz.Point, fitz
                 p1 = fitz.Point(r1.x0, c1.y)
                 p2 = fitz.Point(r2.x1, c2.y)
         else:
-            # Vertical dominant
             if dy > 0:
                 p1 = fitz.Point(c1.x, r1.y1)
                 p2 = fitz.Point(c2.x, r2.y0)
@@ -658,6 +646,8 @@ def _draw_routed_line(
     """
     s = _pull_back_point(end, start, ENDPOINT_PULLBACK)
     e = _pull_back_point(start, end, ENDPOINT_PULLBACK)
+
+    obstacles = [obs for obs in obstacles if not obs.contains(start) and not obs.contains(end)]
 
     # Check if direct path is clear
     direct_blocked = any(_segment_hits_rect(s, e, inflate_rect(obs, 2.0)) for obs in obstacles)
@@ -729,13 +719,14 @@ def _draw_multipage_connector(
     start_x = callout_rect.x1 if callout_rect.x1 < callout_page.rect.width / 2 else callout_rect.x0
     start = fitz.Point(start_x, callout_center.y)
 
-    # Choose margin side for this target (use nearest page edge)
-    if target_rect.x0 > target_page.rect.width / 2:
-        margin_x = target_page.rect.width - EDGE_PAD
-        end_x = target_rect.x1
-    else:
+    # Choose a consistent margin side based on callout position
+    callout_left = callout_rect.x0 < callout_page.rect.width / 2
+    if callout_left:
         margin_x = EDGE_PAD
         end_x = target_rect.x0
+    else:
+        margin_x = target_page.rect.width - EDGE_PAD
+        end_x = target_rect.x1
 
     # End at target (offset to avoid perfectly horizontal lines)
     target_center = _center(target_rect)
@@ -1244,8 +1235,7 @@ def annotate_pdf_bytes(
                     s, e = _edge_to_edge_points(final_rect, r)
                     
                     # Collect obstacles (all red boxes + all OTHER annotations, not this one!)
-                    other_annotations = [ann for ann in occupied_callouts if ann != final_rect]
-                    obstacles = quote_hits_by_page.get(0, []) + other_annotations
+                    obstacles = quote_hits_by_page.get(0, []) + occupied_callouts
                     obstacles = [
                         o for o in obstacles
                         if not o.intersects(inflate_rect(r, OVERLAP_TOLERANCE))
