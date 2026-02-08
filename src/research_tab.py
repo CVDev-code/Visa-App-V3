@@ -201,10 +201,11 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
             excerpt = item.get('excerpt', '')
             
             # Get filename for skip_highlighting tracking
+            # MUST match the filename created in convert_approved_to_pdfs
             if url.startswith('upload://'):
                 filename = url.replace('upload://', '')
             else:
-                filename = title
+                filename = title + '.pdf'  # Add .pdf extension to match convert logic
             
             # Read approval state directly from session state (not local variable)
             is_approved = st.session_state.research_approvals[cid].get(url, True)
