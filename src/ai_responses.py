@@ -172,7 +172,7 @@ DO NOT include any other text. ONLY the JSON array.
             ],
             tools=[
                 {
-                    "type": "web_search_20250305",
+                    "type": "web_search_preview_2025_03_11",  # Use the correct web search tool name
                     "name": "web_search"
                 }
             ]
