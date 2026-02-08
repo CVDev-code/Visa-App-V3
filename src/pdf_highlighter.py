@@ -205,6 +205,39 @@ def _center(rect: fitz.Rect) -> fitz.Point:
     return fitz.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
 
 
+def _clamp(val: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, val))
+
+
+def _edge_points_for_rect(rect: fitz.Rect, toward: fitz.Point) -> List[fitz.Point]:
+    """
+    Candidate points on rect edges, biased toward a point.
+    """
+    x = _clamp(toward.x, rect.x0, rect.x1)
+    y = _clamp(toward.y, rect.y0, rect.y1)
+    return [
+        fitz.Point(rect.x0, y),  # left
+        fitz.Point(rect.x1, y),  # right
+        fitz.Point(x, rect.y0),  # top
+        fitz.Point(x, rect.y1),  # bottom
+    ]
+
+
+def _offset_point_outside_rect(p: fitz.Point, rect: fitz.Rect, pad: float = 1.5) -> fitz.Point:
+    """
+    Nudge a point so it sits just outside the rect edge.
+    """
+    if abs(p.x - rect.x0) < 0.1:
+        return fitz.Point(p.x - pad, p.y)
+    if abs(p.x - rect.x1) < 0.1:
+        return fitz.Point(p.x + pad, p.y)
+    if abs(p.y - rect.y0) < 0.1:
+        return fitz.Point(p.x, p.y - pad)
+    if abs(p.y - rect.y1) < 0.1:
+        return fitz.Point(p.x, p.y + pad)
+    return p
+
+
 def _pull_back_point(from_pt: fitz.Point, to_pt: fitz.Point, dist: float) -> fitz.Point:
     vx = from_pt.x - to_pt.x
     vy = from_pt.y - to_pt.y
@@ -571,34 +604,23 @@ def _edge_to_edge_points(r1: fitz.Rect, r2: fitz.Rect) -> Tuple[fitz.Point, fitz
     c1 = _center(r1)
     c2 = _center(r2)
 
-    dx = c2.x - c1.x
-    dy = c2.y - c1.y
+    # Choose start/end points that minimize line length
+    best_p1 = None
+    best_p2 = None
+    best_d = None
 
-    # Prefer connecting to the closest horizontal edge of the target
-    if r1.x1 <= r2.x0:
-        # Annotation left of target
-        p1 = fitz.Point(r1.x1, c1.y)
-        p2 = fitz.Point(r2.x0, c2.y)
-    elif r1.x0 >= r2.x1:
-        # Annotation right of target
-        p1 = fitz.Point(r1.x0, c1.y)
-        p2 = fitz.Point(r2.x1, c2.y)
-    else:
-        # Overlapping in x; fall back to dominant direction
-        if abs(dx) > abs(dy):
-            if dx > 0:
-                p1 = fitz.Point(r1.x1, c1.y)
-                p2 = fitz.Point(r2.x0, c2.y)
-            else:
-                p1 = fitz.Point(r1.x0, c1.y)
-                p2 = fitz.Point(r2.x1, c2.y)
-        else:
-            if dy > 0:
-                p1 = fitz.Point(c1.x, r1.y1)
-                p2 = fitz.Point(c2.x, r2.y0)
-            else:
-                p1 = fitz.Point(c1.x, r1.y0)
-                p2 = fitz.Point(c2.x, r2.y1)
+    for p1 in _edge_points_for_rect(r1, c2):
+        p1 = _offset_point_outside_rect(p1, r1)
+        candidates = _edge_points_for_rect(r2, p1)
+        # Pick the closest target-edge point to this start
+        p2 = min(candidates, key=lambda p: math.hypot(p.x - p1.x, p.y - p1.y))
+        d = math.hypot(p2.x - p1.x, p2.y - p1.y)
+        if best_d is None or d < best_d:
+            best_d = d
+            best_p1 = p1
+            best_p2 = p2
+
+    p1, p2 = best_p1, best_p2
 
     # Avoid perfectly horizontal lines that look like strike-throughs
     if abs(p1.y - p2.y) < 1.0:
@@ -714,13 +736,13 @@ def _draw_multipage_connector(
     callout_page = doc.load_page(callout_page_idx)
     target_page = doc.load_page(target_page_idx)
 
-    # Start from callout
-    callout_center = _center(callout_rect)
-    start_x = callout_rect.x1 if callout_rect.x1 < callout_page.rect.width / 2 else callout_rect.x0
-    start = fitz.Point(start_x, callout_center.y)
+    # Start from bottom edge of callout (avoid crossing annotation text)
+    callout_left = callout_rect.x0 < callout_page.rect.width / 2
+    start_x = callout_rect.x1 + 1.5 if callout_left else callout_rect.x0 - 1.5
+    start_y = min(callout_rect.y1 - 1.0, callout_page.rect.height - EDGE_PAD - 2.0)
+    start = fitz.Point(start_x, start_y)
 
     # Choose a consistent margin side based on callout position
-    callout_left = callout_rect.x0 < callout_page.rect.width / 2
     if callout_left:
         margin_x = EDGE_PAD
         end_x = target_rect.x0
@@ -1097,17 +1119,19 @@ def annotate_pdf_bytes(
     
     # Apply criterion-specific annotation to first quote term if we have one
     if criterion_label and quote_targets_by_term:
-        # For each quote term, connect the first occurrence on each page
+        # Connect only the first quote occurrence per page (across all terms)
         annotated_targets_by_page: Dict[int, List[fitz.Rect]] = {}
+        all_targets_by_page: Dict[int, List[fitz.Rect]] = {}
 
-        for term, targets_by_page in quote_targets_by_term.items():
-            for pi in sorted(targets_by_page.keys()):
-                rects = sorted(targets_by_page[pi], key=lambda r: (r.y0, r.x0))
-                if rects:
-                    annotated_targets_by_page.setdefault(pi, []).append(rects[0])
+        for _term, targets_by_page in quote_targets_by_term.items():
+            for pi, rects in targets_by_page.items():
+                all_targets_by_page.setdefault(pi, []).extend(rects)
 
-        for pi in list(annotated_targets_by_page.keys()):
-            annotated_targets_by_page[pi] = _dedupe_rects(annotated_targets_by_page[pi], pad=1.0)
+        for pi, rects in all_targets_by_page.items():
+            rects = _dedupe_rects(rects, pad=1.0)
+            rects = sorted(rects, key=lambda r: (r.y0, r.x0))
+            if rects:
+                annotated_targets_by_page[pi] = [rects[0]]
 
         if annotated_targets_by_page:
             # Place the criterion annotation
@@ -1240,6 +1264,7 @@ def annotate_pdf_bytes(
                         o for o in obstacles
                         if not o.intersects(inflate_rect(r, OVERLAP_TOLERANCE))
                     ]
+                    obstacles = [o for o in obstacles if not o.intersects(final_rect)]
                     
                     # Use smart routing
                     _draw_routed_line(page1, s, e, obstacles)
