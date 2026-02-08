@@ -101,12 +101,6 @@ def render_criterion_highlights(cid: str):
         st.divider()
         st.markdown("### 📝 Review Quotes")
         
-        # Initialize approvals
-        if cid not in st.session_state.highlight_approvals:
-            st.session_state.highlight_approvals[cid] = {}
-        
-        criterion_approvals = st.session_state.highlight_approvals[cid]
-        
         # Bulk actions
         col1, col2 = st.columns(2)
         with col1:
@@ -143,7 +137,7 @@ def render_criterion_highlights(cid: str):
         
         # Show highlights for each PDF
         for filename, data in highlights.items():
-            render_pdf_highlights(cid, filename, data, criterion_approvals)
+            render_pdf_highlights(cid, filename, data)
         
         # Regenerate option
         st.divider()
@@ -161,17 +155,20 @@ def render_criterion_highlights(cid: str):
             st.rerun()
 
 
-def render_pdf_highlights(cid: str, filename: str, data: dict, criterion_approvals: dict):
+def render_pdf_highlights(cid: str, filename: str, data: dict):
     """Show highlights for a single PDF"""
     
     quotes_by_criterion = data.get('quotes', {})
     notes = data.get('notes', '')
     
-    # Initialize approvals for this file
-    if filename not in criterion_approvals:
-        criterion_approvals[filename] = {}
+    # Initialize approvals in session state if needed
+    if cid not in st.session_state.highlight_approvals:
+        st.session_state.highlight_approvals[cid] = {}
+    if filename not in st.session_state.highlight_approvals[cid]:
+        st.session_state.highlight_approvals[cid][filename] = {}
     
-    file_approvals = criterion_approvals[filename]
+    # Read directly from session state
+    file_approvals = st.session_state.highlight_approvals[cid][filename]
     
     # Count quotes
     total_quotes = sum(len(quotes) for quotes in quotes_by_criterion.values())
@@ -196,7 +193,8 @@ def render_pdf_highlights(cid: str, filename: str, data: dict, criterion_approva
             strength = quote_data.get('strength', 'medium')
             
             quote_key = quote_text[:100]  # Use first 100 chars as key
-            is_approved = file_approvals.get(quote_key, True)  # Default approve
+            # Read directly from session state
+            is_approved = st.session_state.highlight_approvals[cid][filename].get(quote_key, True)
             
             # Strength indicator
             strength_emoji = {
@@ -211,7 +209,8 @@ def render_pdf_highlights(cid: str, filename: str, data: dict, criterion_approva
                 value=is_approved,
                 key=f"quote_{cid}_{filename}_{i}"
             )
-            file_approvals[quote_key] = new_approval
+            # Write directly to session state
+            st.session_state.highlight_approvals[cid][filename][quote_key] = new_approval
     
     if notes:
         with st.expander("📝 AI Notes"):
