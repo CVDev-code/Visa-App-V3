@@ -40,7 +40,11 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
     
     status = f"({len(results)} sources, {approved_count} approved)" if results else ""
     
-    with st.expander(f"📋 **Criterion ({cid}):** {desc} {status}", expanded=len(results) == 0):
+    # Default to collapsed UNLESS there are results (to keep it open during interaction)
+    # This prevents the annoying auto-close behavior
+    is_expanded = len(results) > 0
+    
+    with st.expander(f"📋 **Criterion ({cid}):** {desc} {status}", expanded=is_expanded):
         
         # ========================================
         # 3 INPUT METHODS
@@ -172,13 +176,13 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
         with col1:
             if st.button("✅ Approve All", key=f"approve_all_{cid}"):
                 for item in results:
-                    approvals[item['url']] = True
+                    st.session_state.research_approvals[cid][item['url']] = True
                 st.rerun()
         
         with col2:
             if st.button("❌ Reject All", key=f"reject_all_{cid}"):
                 for item in results:
-                    approvals[item['url']] = False
+                    st.session_state.research_approvals[cid][item['url']] = False
                 st.rerun()
         
         with col3:
@@ -204,7 +208,7 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                 value=is_approved,
                 key=f"approve_{cid}_{i}"
             )
-            approvals[url] = new_approval
+            st.session_state.research_approvals[cid][url] = new_approval
             
             # Show excerpt and URL
             if excerpt:
@@ -213,11 +217,9 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
             
             st.markdown("---")
         
-        st.session_state.research_approvals[cid] = approvals
-        
         # Show counts
-        approved = sum(1 for ok in approvals.values() if ok)
-        rejected = sum(1 for ok in approvals.values() if not ok)
+        approved = sum(1 for ok in st.session_state.research_approvals[cid].values() if ok)
+        rejected = sum(1 for ok in st.session_state.research_approvals[cid].values() if not ok)
         st.write(f"**✅ Approved: {approved}** | **❌ Rejected: {rejected}**")
         
         # Regenerate option
@@ -237,8 +239,8 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                     from src.ai_responses import search_with_responses_api
                     
                     # Get approved/rejected URLs
-                    approved_urls = [url for url, ok in approvals.items() if ok]
-                    rejected_urls = [url for url, ok in approvals.items() if not ok]
+                    approved_urls = [url for url, ok in st.session_state.research_approvals[cid].items() if ok]
+                    rejected_urls = [url for url, ok in st.session_state.research_approvals[cid].items() if not ok]
                     
                     # Build feedback message
                     feedback_msg = feedback_text or ""
@@ -260,7 +262,7 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                     
                     if new_results:
                         # Keep approved, add new
-                        kept = [r for r in results if approvals.get(r['url'], False)]
+                        kept = [r for r in results if st.session_state.research_approvals[cid].get(r['url'], False)]
                         kept_urls = {r['url'] for r in kept}
                         new_items = [r for r in new_results if r['url'] not in kept_urls]
                         
