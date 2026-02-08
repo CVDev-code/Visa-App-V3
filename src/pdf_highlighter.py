@@ -875,9 +875,9 @@ def annotate_pdf_bytes(
     quote_hits_by_page: Dict[int, List[fitz.Rect]] = {}
 
     # A) Quote highlights (all pages) + dedupe per page
-    # Track first quote term occurrence for criterion-specific annotation
+    # Track quote term occurrences for criterion-specific annotation connectors
     first_quote_term = quote_terms[0] if quote_terms else None
-    first_quote_targets_by_page: Dict[int, List[fitz.Rect]] = {}
+    quote_targets_by_term: Dict[str, Dict[int, List[fitz.Rect]]] = {}
     
     for page_index in range(doc.page_count):
         page = doc.load_page(page_index)
@@ -886,10 +886,8 @@ def annotate_pdf_bytes(
         for term in (quote_terms or []):
             rects = _search_term(page, term)
             page_hits.extend(rects)
-            
-            # Track first quote term separately for annotation
-            if term == first_quote_term and rects:
-                first_quote_targets_by_page.setdefault(page_index, []).extend(rects)
+            if rects:
+                quote_targets_by_term.setdefault(term, {}).setdefault(page_index, []).extend(rects)
 
         page_hits = _dedupe_rects(page_hits, pad=1.0)
         if page_hits:
@@ -899,9 +897,10 @@ def annotate_pdf_bytes(
             page.draw_rect(r, color=RED, width=BOX_WIDTH)
             total_quote_hits += 1
     
-    # Deduplicate first quote term targets per page
-    for pi in list(first_quote_targets_by_page.keys()):
-        first_quote_targets_by_page[pi] = _dedupe_rects(first_quote_targets_by_page[pi], pad=1.0)
+    # Deduplicate quote term targets per page per term
+    for term, targets_by_page in list(quote_targets_by_term.items()):
+        for pi in list(targets_by_page.keys()):
+            targets_by_page[pi] = _dedupe_rects(targets_by_page[pi], pad=1.0)
 
     # B) Metadata callouts (page 1) — targets can exist on any page now
     connectors_to_draw = []  # list of dicts
@@ -1072,9 +1071,18 @@ def annotate_pdf_bytes(
     # Criteria 2, 4, 7 get no quote-term annotation
     
     # Apply criterion-specific annotation to first quote term if we have one
-    if criterion_label and first_quote_targets_by_page:
-        # Use ALL occurrences of the first quote term for connectors
-        annotated_targets_by_page: Dict[int, List[fitz.Rect]] = dict(first_quote_targets_by_page)
+    if criterion_label and quote_targets_by_term:
+        # For each quote term, connect the first occurrence on each page
+        annotated_targets_by_page: Dict[int, List[fitz.Rect]] = {}
+
+        for term, targets_by_page in quote_targets_by_term.items():
+            for pi in sorted(targets_by_page.keys()):
+                rects = sorted(targets_by_page[pi], key=lambda r: (r.y0, r.x0))
+                if rects:
+                    annotated_targets_by_page.setdefault(pi, []).append(rects[0])
+
+        for pi in list(annotated_targets_by_page.keys()):
+            annotated_targets_by_page[pi] = _dedupe_rects(annotated_targets_by_page[pi], pad=1.0)
 
         if annotated_targets_by_page:
             # Place the criterion annotation
@@ -1123,7 +1131,7 @@ def annotate_pdf_bytes(
                 connectors_to_draw.append(
                     {
                         "final_rect": final_rect,
-                        "connect_policy": "page_first",
+                        "connect_policy": "explicit",
                         "targets_by_page": annotated_targets_by_page,
                     }
                 )
