@@ -673,8 +673,8 @@ def _extract_image_caption(img) -> Optional[str]:
 
 def convert_webpage_to_pdf_with_margins(
     webpage_data: Dict[str, str],
-    left_margin_mm: float = 30,
-    right_margin_mm: float = 30,
+    left_margin_mm: float = 35,
+    right_margin_mm: float = 35,
     top_margin_mm: float = 30,
     bottom_margin_mm: float = 30
 ) -> bytes:
@@ -753,7 +753,7 @@ def convert_webpage_to_pdf_with_margins(
         <style>
             @page {{
                 size: letter;
-                margin: 20mm 30mm 20mm 30mm;
+                margin: {top_margin_mm}mm {right_margin_mm}mm {bottom_margin_mm}mm {left_margin_mm}mm;
                 
                 @bottom-left {{
                     content: "{timestamp}";
@@ -1011,11 +1011,11 @@ def batch_convert_urls_to_pdfs(
                 if progress_callback:
                     progress_callback(processed, total_urls, f"Converting: {title}")
                 
-                # Convert to PDF with 30mm margins
+                # Convert to PDF with slightly wider margins
                 pdf_bytes = convert_webpage_to_pdf_with_margins(
                     webpage_data,
-                    left_margin_mm=30,
-                    right_margin_mm=30,
+                    left_margin_mm=35,
+                    right_margin_mm=35,
                     top_margin_mm=30,
                     bottom_margin_mm=30
                 )
