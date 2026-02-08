@@ -125,9 +125,10 @@ def render_criterion_highlights(cid: str):
                     if filename not in st.session_state.highlight_approvals[cid]:
                         st.session_state.highlight_approvals[cid][filename] = {}
                     for criterion_id, quotes in data.get('quotes', {}).items():
-                        for quote in quotes:
+                        for i, quote in enumerate(quotes):
                             quote_key = quote['quote'][:100]  # Use first 100 chars as key
                             st.session_state.highlight_approvals[cid][filename][quote_key] = True
+                            st.session_state[f"quote_{cid}_{filename}_{i}"] = True
                 st.rerun()
         
         with col2:
@@ -140,9 +141,10 @@ def render_criterion_highlights(cid: str):
                     if filename not in st.session_state.highlight_approvals[cid]:
                         st.session_state.highlight_approvals[cid][filename] = {}
                     for criterion_id, quotes in data.get('quotes', {}).items():
-                        for quote in quotes:
+                        for i, quote in enumerate(quotes):
                             quote_key = quote['quote'][:100]
                             st.session_state.highlight_approvals[cid][filename][quote_key] = False
+                            st.session_state[f"quote_{cid}_{filename}_{i}"] = False
                 st.rerun()
         
         st.markdown("---")
