@@ -240,17 +240,50 @@ REJECT these source types:
 - forbes.com/artist-name
 - wikipedia.org
 - artist-website.com/awards
-- news articles ABOUT awards
+- news articles ABOUT awards (nytimes.com/yo-yo-ma-wins-grammy)
 - biography pages
+- management/publicity sites
 
 ACCEPT only these source types:
 - grammy.com/awards/winners
 - kennedy-center.org/honors
 - pulitzer.org/winners
-- [award-organization].org/winners
+- opusklassik.de/preistraeger (for classical music)
+- [official-award-organization].org/winners
+
+QUALITY OVER QUANTITY:
+If you can only find 3-5 official award sites, return only those 3-5.
+DO NOT fill the remaining slots with Forbes or biographies.
+Better to return 3 perfect sources than 10 mixed sources.
+"""
+    elif criterion_id == "6":
+        prompt += f"""
+CRITICAL FOR CRITERION 6 (RECOGNITION):
+- Focus on recognition from leading organizations, institutions, or experts
+- Include: Honorary degrees, fellowships, institutional awards, expert testimonials
+- Prioritize: Universities, professional associations, government entities
+
+QUALITY OVER QUANTITY:
+If you can only find 3-5 high-quality recognition sources, return only those.
+DO NOT include generic articles or weak sources to fill the quota.
+"""
+    elif criterion_id == "7":
+        prompt += f"""
+CRITICAL FOR CRITERION 7 (HIGH SALARY):
+- Artist fee/contract data is rarely public - don't force it
+- Include: BLS wage data, O*NET salary benchmarks, union scales
+- If no reliable fee data exists, return fewer sources
+
+QUALITY OVER QUANTITY:
+Salary data is often unavailable. Return 2-3 sources with benchmark data rather than 10 speculative sources.
 """
     
-    prompt += f"\nFind {max_results} high-quality sources (following the criterion-specific guidance above).\n"
+    # Adjust the "find X sources" instruction based on criterion
+    if criterion_id in ["1", "6", "7"]:
+        prompt += f"\nFind UP TO {max_results} high-quality sources (following the criterion-specific guidance above).\n"
+        prompt += "Return FEWER sources if necessary to maintain quality standards.\n"
+    else:
+        prompt += f"\nFind {max_results} high-quality sources (following the criterion-specific guidance above).\n"
     
     if feedback:
         prompt += f"\nUser feedback: {feedback}\n"
