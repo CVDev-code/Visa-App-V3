@@ -172,11 +172,10 @@ DO NOT include any other text. ONLY the JSON array.
             ],
             tools=[
                 {
-                    "type": "web_search_preview_2025_03_11",  # Use the correct web search tool name
-                    "name": "web_search"
+                    "type": "web_search_preview_2025_03_11"
+                    # Note: 'name' parameter not needed in Responses API
                 }
             ]
-            # Note: response_format not supported in Responses API yet
         )
         
         # Extract text from response
