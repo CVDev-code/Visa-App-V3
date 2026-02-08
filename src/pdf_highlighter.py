@@ -26,8 +26,8 @@ NO_GO_RECT = fitz.Rect(
 )
 
 # ---- spacing knobs ----
-EDGE_PAD = 24.0  # Increased from 12.0 to give more margin space
-GAP_FROM_TEXT_BLOCKS = 18.0  # Increased from 8.0 for better annotation spacing
+EDGE_PAD = 28.0  # Increased from 12.0 to give more margin space
+GAP_FROM_TEXT_BLOCKS = 22.0  # Increased from 8.0 for better annotation spacing
 GAP_FROM_HIGHLIGHTS = 10.0
 GAP_BETWEEN_CALLOUTS = 8.0
 ENDPOINT_PULLBACK = 1.5
@@ -41,6 +41,7 @@ OVERLAP_TOLERANCE = 2.0         # Extra padding to detect overlaps
 MAX_CONNECTORS_PER_PAGE = 3
 MAX_TOTAL_CONNECTORS = 12
 MIN_CONNECTOR_VERTICAL_SPACING = 40.0
+CONNECTOR_ANGLE_OFFSET = 6.0
 
 # Arrowhead (DISABLED by setting to 0)
 ARROW_LEN = 0.0  # Changed from 9.0 to 0.0 to disable arrowheads
@@ -611,6 +612,13 @@ def _edge_to_edge_points(r1: fitz.Rect, r2: fitz.Rect) -> Tuple[fitz.Point, fitz
                 p1 = fitz.Point(c1.x, r1.y0)
                 p2 = fitz.Point(c2.x, r2.y1)
 
+    # Avoid perfectly horizontal lines that look like strike-throughs
+    if abs(p1.y - p2.y) < 1.0:
+        if p2.y + CONNECTOR_ANGLE_OFFSET <= r2.y1 - 1.0:
+            p2 = fitz.Point(p2.x, p2.y + CONNECTOR_ANGLE_OFFSET)
+        elif p2.y - CONNECTOR_ANGLE_OFFSET >= r2.y0 + 1.0:
+            p2 = fitz.Point(p2.x, p2.y - CONNECTOR_ANGLE_OFFSET)
+
     return p1, p2
 
 
@@ -703,6 +711,8 @@ def _draw_multipage_connector(
     callout_rect: fitz.Rect,
     target_page_idx: int,
     target_rect: fitz.Rect,
+    *,
+    occupied_callouts: Optional[List[fitz.Rect]] = None,
 ):
     """
     Draw a connector from a callout on one page to a target on another page.
@@ -719,17 +729,38 @@ def _draw_multipage_connector(
     start_x = callout_rect.x1 if callout_rect.x1 < callout_page.rect.width / 2 else callout_rect.x0
     start = fitz.Point(start_x, callout_center.y)
 
-    # End at target
+    # Choose margin side for this target (use nearest page edge)
+    if target_rect.x0 > target_page.rect.width / 2:
+        margin_x = target_page.rect.width - EDGE_PAD
+        end_x = target_rect.x1
+    else:
+        margin_x = EDGE_PAD
+        end_x = target_rect.x0
+
+    # End at target (offset to avoid perfectly horizontal lines)
     target_center = _center(target_rect)
-    end_x = target_rect.x0 if target_rect.x0 > target_page.rect.width / 2 else target_rect.x1
     end = fitz.Point(end_x, target_center.y)
+    if abs(end.y - start.y) < 1.0:
+        if end.y + CONNECTOR_ANGLE_OFFSET <= target_rect.y1 - 1.0:
+            end = fitz.Point(end.x, end.y + CONNECTOR_ANGLE_OFFSET)
+        elif end.y - CONNECTOR_ANGLE_OFFSET >= target_rect.y0 + 1.0:
+            end = fitz.Point(end.x, end.y - CONNECTOR_ANGLE_OFFSET)
 
     # Draw vertical line to bottom of callout page
-    margin_x = callout_page.rect.width - EDGE_PAD if start_x > callout_page.rect.width / 2 else EDGE_PAD
+    obstacles = occupied_callouts or []
+    y = start.y
+    if obstacles:
+        for offset in (0.0, 6.0, -6.0, 12.0, -12.0, 18.0, -18.0, 24.0, -24.0, 30.0, -30.0):
+            y_try = start.y + offset
+            seg = fitz.Rect(min(start.x, margin_x), y_try - 1.0, max(start.x, margin_x), y_try + 1.0)
+            if not any(seg.intersects(inflate_rect(o, 2.0)) for o in obstacles if o != callout_rect):
+                y = y_try
+                break
+
     bottom_point = fitz.Point(margin_x, callout_page.rect.height - EDGE_PAD)
 
-    callout_page.draw_line(start, fitz.Point(margin_x, start.y), color=RED, width=LINE_WIDTH)
-    callout_page.draw_line(fitz.Point(margin_x, start.y), bottom_point, color=RED, width=LINE_WIDTH)
+    callout_page.draw_line(start, fitz.Point(margin_x, y), color=RED, width=LINE_WIDTH)
+    callout_page.draw_line(fitz.Point(margin_x, y), bottom_point, color=RED, width=LINE_WIDTH)
 
     # Draw on intermediate pages if any
     for pi in range(callout_page_idx + 1, target_page_idx):
@@ -740,8 +771,11 @@ def _draw_multipage_connector(
 
     # Draw on target page
     top_point = fitz.Point(margin_x, EDGE_PAD)
-    target_page.draw_line(top_point, fitz.Point(margin_x, end.y), color=RED, width=LINE_WIDTH)
-    target_page.draw_line(fitz.Point(margin_x, end.y), end, color=RED, width=LINE_WIDTH)
+    approach = fitz.Point(margin_x, end.y + CONNECTOR_ANGLE_OFFSET)
+    if approach.y < EDGE_PAD + 2.0 or approach.y > target_page.rect.height - EDGE_PAD - 2.0:
+        approach = fitz.Point(margin_x, end.y - CONNECTOR_ANGLE_OFFSET)
+    target_page.draw_line(top_point, approach, color=RED, width=LINE_WIDTH)
+    target_page.draw_line(approach, end, color=RED, width=LINE_WIDTH)
     
     # Draw arrowhead only if enabled
     if ARROW_LEN > 0:
@@ -1212,11 +1246,22 @@ def annotate_pdf_bytes(
                     # Collect obstacles (all red boxes + all OTHER annotations, not this one!)
                     other_annotations = [ann for ann in occupied_callouts if ann != final_rect]
                     obstacles = quote_hits_by_page.get(0, []) + other_annotations
+                    obstacles = [
+                        o for o in obstacles
+                        if not o.intersects(inflate_rect(r, OVERLAP_TOLERANCE))
+                    ]
                     
                     # Use smart routing
                     _draw_routed_line(page1, s, e, obstacles)
                 else:
-                    _draw_multipage_connector(doc, callout_page_index, final_rect, pi, r)
+                    _draw_multipage_connector(
+                        doc,
+                        callout_page_index,
+                        final_rect,
+                        pi,
+                        r,
+                        occupied_callouts=occupied_callouts,
+                    )
 
     out = io.BytesIO()
     doc.save(out)
