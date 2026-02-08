@@ -1,6 +1,6 @@
 """
-O-1 Visa Evidence Assistant - Restructured App
-Three input methods for each criterion: Upload, URL, AI Agent
+O-1 Visa Evidence Assistant
+2-Tab Workflow: Research → Highlight & Export
 """
 
 import streamlit as st
@@ -11,7 +11,7 @@ st.set_page_config(
     page_title="O-1 Visa Evidence Assistant",
     page_icon="📄",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # Initialize session state
@@ -20,19 +20,16 @@ def init_session_state():
     defaults = {
         "beneficiary_name": "",
         "beneficiary_variants": [],
-        "selected_criteria": [],
         "artist_field": "",
         
-        # Store inputs by criterion - each can have multiple sources
-        "criterion_uploads": {},      # {cid: [(filename, bytes), ...]}
-        "criterion_urls": {},          # {cid: [url1, url2, ...]}
-        "criterion_agent_results": {}, # {cid: [{url, title, ...}, ...]}
+        # Tab 1: Research results by criterion
+        "research_results": {},      # {cid: [{url, title, excerpt, source}, ...]}
+        "research_approvals": {},    # {cid: {url: True/False, ...}}
         
-        # Processed PDFs ready for highlighting
-        "criterion_pdfs": {},          # {cid: {filename: bytes, ...}}
-        
-        # Highlighting results
-        "criterion_highlights": {},    # {cid: {filename: {quotes, metadata}, ...}}
+        # Tab 2: PDFs and highlights by criterion  
+        "criterion_pdfs": {},        # {cid: {filename: bytes, ...}}
+        "highlight_results": {},     # {cid: {filename: {quotes: {...}, notes: ""}, ...}}
+        "highlight_approvals": {},   # {cid: {filename: {quote_text: True/False, ...}}}
     }
     
     for key, default in defaults.items():
@@ -41,18 +38,31 @@ def init_session_state():
 
 init_session_state()
 
-# Sidebar - Global Settings
-with st.sidebar:
-    st.header("⚙️ Global Settings")
-    
+# App header
+st.title("📄 O-1 Visa Evidence Assistant")
+
+# Artist name input (always visible at top)
+col1, col2 = st.columns([2, 1])
+
+with col1:
     st.session_state.beneficiary_name = st.text_input(
         "Beneficiary Name",
         value=st.session_state.beneficiary_name,
-        placeholder="e.g., Yo-Yo Ma"
+        placeholder="e.g., Yo-Yo Ma",
+        help="Enter the artist's full name"
     )
-    
+
+with col2:
+    st.session_state.artist_field = st.text_input(
+        "Field (optional)",
+        value=st.session_state.artist_field,
+        placeholder="e.g., Classical Music"
+    )
+
+# Name variants (collapsible)
+with st.expander("📝 Name Variants (optional)"):
     variants_text = st.text_area(
-        "Name Variants (one per line)",
+        "Enter name variants (one per line)",
         value="\n".join(st.session_state.beneficiary_variants),
         placeholder="e.g.:\nYo Yo Ma\nYoYo Ma",
         height=80
@@ -60,79 +70,29 @@ with st.sidebar:
     st.session_state.beneficiary_variants = [
         v.strip() for v in variants_text.split("\n") if v.strip()
     ]
-    
-    st.session_state.artist_field = st.text_input(
-        "Field (optional)",
-        value=st.session_state.artist_field,
-        placeholder="e.g., Classical Music"
-    )
-    
-    st.divider()
-    
-    st.subheader("Select Criteria")
-    st.caption("Choose which criteria to gather evidence for")
-    
-    selected = []
-    for cid, desc in CRITERIA.items():
-        if st.checkbox(
-            f"({cid}) {desc[:50]}...",
-            value=cid in st.session_state.selected_criteria,
-            key=f"select_{cid}"
-        ):
-            selected.append(cid)
-    
-    st.session_state.selected_criteria = selected
-    
-    if not st.session_state.beneficiary_name:
-        st.warning("⚠️ Please enter beneficiary name")
-    
-    if not st.session_state.selected_criteria:
-        st.warning("⚠️ Please select at least one criterion")
 
-# Main App
-st.title("📄 O-1 Visa Evidence Assistant")
-
-if not st.session_state.beneficiary_name or not st.session_state.selected_criteria:
-    st.info("""
-    👈 **Get started:**
-    1. Enter beneficiary name in sidebar
-    2. Select criteria to work on
-    3. Choose a tab below to begin gathering evidence
-    """)
+if not st.session_state.beneficiary_name:
+    st.info("👆 Please enter beneficiary name to begin")
     st.stop()
 
+st.divider()
+
 # Create tabs
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📂 Gather Evidence",
-    "✨ Highlight & Review", 
-    "💬 ChatGPT Helper",
-    "📦 Export Package"
+tab1, tab2 = st.tabs([
+    "🔍 Research & Gather Evidence",
+    "✨ Highlight & Export"
 ])
 
 # ============================================================
-# TAB 1: GATHER EVIDENCE
+# TAB 1: RESEARCH & GATHER EVIDENCE
 # ============================================================
 with tab1:
-    from src.evidence_gatherer import render_evidence_gatherer
-    render_evidence_gatherer()
+    from src.research_tab import render_research_tab
+    render_research_tab()
 
 # ============================================================
-# TAB 2: HIGHLIGHT & REVIEW
+# TAB 2: HIGHLIGHT & EXPORT
 # ============================================================
 with tab2:
-    from src.highlighter_tab import render_highlighter_tab
-    render_highlighter_tab()
-
-# ============================================================
-# TAB 3: CHATGPT HELPER
-# ============================================================
-with tab3:
-    from src.chatgpt_helper import show_chatgpt_helper
-    show_chatgpt_helper()
-
-# ============================================================
-# TAB 4: EXPORT PACKAGE
-# ============================================================
-with tab4:
-    from src.export_package import render_export_tab
-    render_export_tab()
+    from src.highlight_tab import render_highlight_tab
+    render_highlight_tab()
