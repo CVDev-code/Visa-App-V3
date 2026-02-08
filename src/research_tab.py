@@ -124,9 +124,9 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
             if st.button("🔍 Search with AI", key=f"ai_{cid}", use_container_width=True):
                 with st.spinner("🤖 AI Agent searching..."):
                     try:
-                        from src.ai_assistant import search_with_ai_assistant
+                        from src.ai_responses import search_with_responses_api
                         
-                        results_found = search_with_ai_assistant(
+                        results_found = search_with_responses_api(
                             artist_name=beneficiary_name,
                             criterion_id=cid,
                             criterion_description=desc,
@@ -155,30 +155,7 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                     
                     except Exception as e:
                         st.error(f"AI Agent error: {str(e)}")
-                        
-                        # Show helpful message if assistant not configured
-                        if "OPENAI_ASSISTANT_ID" in str(e):
-                            with st.expander("📖 How to set up AI Agent"):
-                                st.markdown("""
-                                **Step 1:** Go to https://platform.openai.com/assistants
-                                
-                                **Step 2:** Click "Create Assistant"
-                                
-                                **Step 3:** Configure:
-                                - Name: "O-1 Visa Evidence Researcher"
-                                - Model: gpt-4o
-                                - Tools: Enable "Web Search"
-                                - Instructions: (see documentation)
-                                
-                                **Step 4:** Copy the Assistant ID (starts with `asst_...`)
-                                
-                                **Step 5:** Add to Streamlit Secrets:
-                                ```
-                                OPENAI_ASSISTANT_ID = "asst_abc123..."
-                                ```
-                                """)
-                        else:
-                            st.info("💡 Try the Upload or URL methods instead")
+                        st.info("💡 Try the Upload or URL methods instead")
         
         # ========================================
         # REVIEW & APPROVE RESULTS
@@ -257,7 +234,7 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
         if st.button("🔄 Regenerate with AI", key=f"regen_{cid}"):
             with st.spinner("Regenerating..."):
                 try:
-                    from src.ai_assistant import search_with_ai_assistant
+                    from src.ai_responses import search_with_responses_api
                     
                     # Get approved/rejected URLs
                     approved_urls = [url for url, ok in approvals.items() if ok]
@@ -271,7 +248,7 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                         for url in rejected_urls[:3]:  # Show first 3 as examples
                             feedback_msg += f"- {url}\n"
                     
-                    new_results = search_with_ai_assistant(
+                    new_results = search_with_responses_api(
                         artist_name=beneficiary_name,
                         criterion_id=cid,
                         criterion_description=desc,
