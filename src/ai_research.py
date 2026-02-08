@@ -77,20 +77,31 @@ def _search_with_vertex_ai(
             "Add your Google Cloud project ID to Streamlit secrets."
         )
     
-    # Get credentials from secrets (Streamlit Cloud)
-    credentials = None
+    # Get credentials from secrets (Streamlit Cloud) - REQUIRED
     try:
         import streamlit as st
         from google.oauth2 import service_account
-        import json
         
-        if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in st.secrets:
-            # Convert TOML section to dict
-            creds_dict = dict(st.secrets["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
-            credentials = service_account.Credentials.from_service_account_info(creds_dict)
+        if "GOOGLE_APPLICATION_CREDENTIALS_JSON" not in st.secrets:
+            raise RuntimeError(
+                "GOOGLE_APPLICATION_CREDENTIALS_JSON not found in Streamlit secrets.\n"
+                "Add your service account JSON to secrets."
+            )
+        
+        # Convert TOML section to dict
+        creds_dict = dict(st.secrets["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
+        credentials = service_account.Credentials.from_service_account_info(creds_dict)
+        print("[Vertex AI] Successfully loaded credentials from Streamlit secrets")
+    except ImportError:
+        raise RuntimeError(
+            "Running outside Streamlit - cannot load credentials.\n"
+            "Set GOOGLE_APPLICATION_CREDENTIALS environment variable."
+        )
     except Exception as e:
-        print(f"[Warning] Could not load credentials from secrets: {e}")
-        credentials = None
+        raise RuntimeError(
+            f"Failed to load credentials from Streamlit secrets: {e}\n\n"
+            "Make sure GOOGLE_APPLICATION_CREDENTIALS_JSON is properly formatted in secrets."
+        )
     
     # Initialize Vertex AI with explicit credentials
     try:
