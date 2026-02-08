@@ -24,6 +24,10 @@ def _get_secret(name: str):
 # System prompt with USCIS guidance
 RESEARCH_SYSTEM_PROMPT = """You are a visa paralegal assistant researching O-1 visa evidence for artists.
 
+CRITICAL OUTPUT REQUIREMENT:
+You MUST return ONLY a valid JSON array. No explanations, no markdown, no code blocks, no preamble, no postamble.
+Just the raw JSON array starting with [ and ending with ].
+
 USCIS Regulatory Standards
 
 According to 8 CFR 214.2(o)(3)(iv), evidence must demonstrate extraordinary ability.
@@ -72,18 +76,22 @@ Your Task:
 
 Search the web for 8-10 high-quality sources that support the given O-1 criterion.
 
-Return ONLY a JSON array in this format:
-[
-  {
-    "url": "https://example.com/article",
-    "title": "Article Title",
-    "source": "Publication Name (e.g., New York Times)",
-    "excerpt": "Brief relevant excerpt (1-2 sentences)",
-    "relevance": "Why this supports the criterion and meets USCIS standards"
-  }
-]
+OUTPUT FORMAT - CRITICAL:
+Return ONLY a JSON array. No other text whatsoever.
 
-CRITICAL: Return ONLY the JSON array. No markdown, no explanatory text.
+Example of CORRECT output:
+[{"url":"https://example.com","title":"Title","source":"Source","excerpt":"Excerpt","relevance":"Why relevant"}]
+
+Example of WRONG output:
+Here are the results:
+[...]
+
+Example of WRONG output:
+```json
+[...]
+```
+
+ONLY return the raw JSON array. Nothing else.
 """
 
 
@@ -167,8 +175,8 @@ DO NOT include any other text. ONLY the JSON array.
                     "type": "web_search_20250305",
                     "name": "web_search"
                 }
-            ],
-            response_format={"type": "json_object"}
+            ]
+            # Note: response_format not supported in Responses API yet
         )
         
         # Extract text from response
@@ -180,20 +188,36 @@ DO NOT include any other text. ONLY the JSON array.
         # Parse JSON response
         try:
             # Try to extract JSON array from response
+            # The response might include extra text since we can't force JSON format
             content_text = content_text.strip()
             
-            # Find JSON array (starts with [ and ends with ])
+            # Try to find JSON array markers
+            # Look for [ and ] that likely contain our JSON
             start = content_text.find('[')
             end = content_text.rfind(']') + 1
             
             if start == -1 or end == 0:
-                raise ValueError("No JSON array found in response")
-            
-            json_str = content_text[start:end]
-            results = json.loads(json_str)
-            
-            if not isinstance(results, list):
-                raise ValueError("Response is not a JSON array")
+                # No JSON array found - try to parse the whole thing
+                # Maybe it's just the JSON without extra text
+                try:
+                    results = json.loads(content_text)
+                    if isinstance(results, list):
+                        # Great, it was just a JSON array
+                        pass
+                    else:
+                        raise ValueError("Response is not a JSON array")
+                except json.JSONDecodeError:
+                    raise ValueError(
+                        f"No JSON array found in response. "
+                        f"Response was: {content_text[:200]}..."
+                    )
+            else:
+                # Found array markers - extract JSON
+                json_str = content_text[start:end]
+                results = json.loads(json_str)
+                
+                if not isinstance(results, list):
+                    raise ValueError("Response is not a JSON array")
             
             # Validate and normalize results
             normalized_results = []
