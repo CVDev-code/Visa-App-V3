@@ -936,6 +936,7 @@ def batch_convert_urls_to_pdfs(
         for url_data in urls:
             url = url_data.get('url')
             title = url_data.get('title', 'Untitled')
+            custom_filename = url_data.get('filename')  # Allow custom filename
             
             try:
                 if progress_callback:
@@ -956,9 +957,13 @@ def batch_convert_urls_to_pdfs(
                     bottom_margin_mm=30
                 )
                 
-                # Create safe filename
-                safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_'))[:50]
-                filename = f"{safe_title}.pdf"
+                # Use custom filename if provided, otherwise create safe filename from title
+                if custom_filename:
+                    filename = custom_filename
+                else:
+                    # Create safe filename
+                    safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_'))[:50]
+                    filename = f"{safe_title}.pdf"
                 
                 result[criterion_id][filename] = pdf_bytes
                 processed += 1
