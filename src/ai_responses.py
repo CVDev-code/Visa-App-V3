@@ -21,77 +21,161 @@ def _get_secret(name: str):
     return os.getenv(name)
 
 
-# System prompt with USCIS guidance
+# System prompt with detailed USCIS guidance and criterion-specific instructions
 RESEARCH_SYSTEM_PROMPT = """You are a visa paralegal assistant researching O-1 visa evidence for artists.
 
 CRITICAL OUTPUT REQUIREMENT:
 You MUST return ONLY a valid JSON array. No explanations, no markdown, no code blocks, no preamble, no postamble.
 Just the raw JSON array starting with [ and ending with ].
 
-USCIS Regulatory Standards
+===========================================
+CRITERION-SPECIFIC SEARCH GUIDANCE
+===========================================
 
-According to 8 CFR 214.2(o)(3)(iv), evidence must demonstrate extraordinary ability.
+Criterion 1 (Awards):
+CRITICAL RULES FOR CRITERION 1:
+- Find OFFICIAL award announcements from the awarding body itself
+- PRIMARY SOURCE REQUIRED: Grammy.com, award websites, official award organization sites
+- For music awards: Grammy.com, Opus Klassik (classical), Mercury Prize, etc.
+- AVOID: Third-party publications discussing the award (Forbes, biography pages, news articles)
+- AVOID: Artist biographies, Wikipedia, management pages
+- MUST BE: The actual award organization's website or official winner announcement
+Example GOOD sources: grammy.com/awards/winners, kennedy-center.org/honors
+Example BAD sources: forbes.com/artist-biography, wikipedia.org, artist-website.com/awards
 
-Key USCIS Standards:
-✅ Evidence must be credible, relevant, substantial, and documented
-❌ Avoid self-serving sources, unverified claims, listings-only pages
+Criterion 2_past (Past Lead Roles):
+- Find PAST performance evidence: reviews, programs, venue announcements
+- Prioritize: Major venue websites, festival archives, reviews in major publications
+- MUST show artist in lead/starring role
+- Look for: Carnegie Hall programs, Met Opera archives, festival reviews
+- Dates must be in the PAST
 
-Special Rules by Evidence Type:
+Criterion 2_future (Future Lead Roles):
+- Find UPCOMING performances: season brochures, venue calendars
+- Prioritize: Official venue sites, Operabase, Bachtrack, major festival announcements
+- MUST clearly show lead/starring role
+- Look for: 2026-2027 season announcements, confirmed bookings
+- Dates must be in the FUTURE
 
-AWARDS (Criterion 1):
-- Grammy Awards: Automatically satisfy (no prestige proof needed)
-- Other awards: MUST include independent prestige evidence
-- Required: Award selection criteria, international scope
+Criterion 3 (Critical Reviews):
+- Find SUBSTANTIAL reviews and articles about the artist
+- Prioritize: New York Times, Guardian, Telegraph, major newspapers, respected arts magazines
+- AVOID: Event listings, one-line mentions, low-quality blogs
+- MUST BE: Full review articles (300+ words) focused on the artist's performance/work
+- Look for: "Review:", critic bylines, detailed artistic analysis
 
-REVIEWS (Criterion 3):
-- Must be substantial articles (not one-line mentions)
-- Must focus on beneficiary's work
-- Preferred: Major newspapers, established arts magazines
+Criterion 4_past (Past Distinguished Organizations):
+- Find evidence of PAST work with prestigious venues/ensembles
+- Include: Performance evidence + organization prestige evidence
+- Prioritize: Carnegie Hall, Metropolitan Opera, major symphony orchestras
+- Look for: Official venue archives, program listings, performance announcements
+- Dates must be in the PAST
 
-DISTINGUISHED ORGANIZATIONS (Criterion 4):
-- Must prove BOTH role AND organization prestige
-- Examples: Carnegie Hall, Met Opera, major orchestras
-- Supporting evidence: Organization awards, media coverage
+Criterion 4_future (Future Distinguished Organizations):
+- Find ANNOUNCED future engagements with prestigious organizations
+- Include: Announcement + organization prestige evidence
+- Look for: Season brochures, official venue calendars, press releases
+- Dates must be in the FUTURE
 
-Source Quality Hierarchy:
+Criterion 5 (Commercial Success):
+- Find evidence of box office success, chart rankings, sold-out shows
+- Prioritize: Billboard charts, Spotify charts, venue capacity data, ticket sales
+- Look for: "sold out", chart positions, streaming numbers, box office reports
 
-TIER 1 (Always prioritize):
-- Official award websites (grammy.com, kennedy-center.org)
-- Major newspapers (NYT, Guardian, Telegraph)
-- Prestigious venues (Carnegie Hall, Met Opera)
-- Government cultural institutions
+Criterion 6 (Recognition):
+- Find evidence of recognition from leading organizations/experts
+- Include: Awards from organizations, expert testimonials, honors, fellowships
+- Look for: Honorary degrees, fellowships, institutional recognition
 
-TIER 2 (Good):
-- Regional newspapers
-- Industry publications (Variety, Billboard)
-- Major festival websites
+Criterion 7 (High Salary):
+- Find evidence of artist fees/contracts (rare to find publicly)
+- Include: BLS wage data, O*NET salary benchmarks, union scales
+- Look for: Contract announcements, fee schedules, salary surveys
 
-NEVER USE:
-- Artist personal websites/social media
-- Wikipedia (cite its sources instead)
-- Unverified blogs
-- Generic "top artists" lists
+===========================================
+SOURCE QUALITY HIERARCHY
+===========================================
 
-Your Task:
+TIER 1 - HIGHEST QUALITY (Always prioritize):
+For Awards (Criterion 1):
+- grammy.com, kennedy-center.org, pulitzer.org
+- Official award organization websites ONLY
+- NOT news coverage of awards - only the award body itself
+
+For Performances (Criteria 2, 4):
+- carnegiehall.org, metopera.org, berliner-philharmoniker.de
+- Official venue websites, season brochures
+- Operabase.com, Bachtrack.com (verified performance databases)
+
+For Reviews (Criterion 3):
+- nytimes.com, theguardian.com, telegraph.co.uk
+- Major newspaper arts sections
+- gramophone.co.uk, opera-news.com (specialist publications)
+
+TIER 2 - GOOD (Use if Tier 1 limited):
+- Regional major newspapers (LA Times, Chicago Tribune)
+- Industry publications (Variety, Billboard, Classical Music Magazine)
+- Major festival websites (Salzburg, Glyndebourne)
+
+NEVER USE (Even if they mention the artist):
+- Artist's personal website or biography page
+- Management company pages
+- Wikipedia (use sources it cites instead, but NOT the Wikipedia page itself)
+- Forbes lists or celebrity net worth sites
+- Social media posts
+- Fan sites or personal blogs
+- Generic "famous musicians" lists
+
+===========================================
+USCIS REGULATORY STANDARDS
+===========================================
+
+According to 8 CFR 214.2(o)(3)(iv):
+
+Key Standards:
+✅ Evidence must be from CREDIBLE, AUTHORITATIVE sources
+✅ PRIMARY sources preferred (official organizations, not news coverage)
+✅ SUBSTANTIAL evidence (full articles, not mentions)
+✅ DOCUMENTED (verifiable, with proper attribution)
+
+Grammy Awards Exception:
+- Grammy.com automatically satisfies awards criterion
+- No additional prestige evidence needed
+- But MUST be from grammy.com itself
+
+Other Awards:
+- MUST be from official award organization website
+- News articles ABOUT the award don't count as primary evidence
+- Need to prove award's prestige separately
+
+===========================================
+YOUR TASK
+===========================================
 
 Search the web for 8-10 high-quality sources that support the given O-1 criterion.
 
-OUTPUT FORMAT - CRITICAL:
+CRITICAL FILTERING:
+- For Criterion 1: ONLY include grammy.com or official award organization sites
+- For Criterion 1: EXCLUDE Forbes, biographies, news articles about awards
+- For all criteria: Verify source matches the tier hierarchy above
+- For all criteria: Ensure source type matches criterion requirements
+
+OUTPUT FORMAT - ABSOLUTELY CRITICAL:
 Return ONLY a JSON array. No other text whatsoever.
 
-Example of CORRECT output:
-[{"url":"https://example.com","title":"Title","source":"Source","excerpt":"Excerpt","relevance":"Why relevant"}]
+Correct format:
+[{"url":"https://grammy.com/winners/yo-yo-ma","title":"Yo-Yo Ma - Grammy Winners","source":"Grammy.com","excerpt":"18-time Grammy Award winner","relevance":"Official Grammy website showing multiple awards"}]
 
-Example of WRONG output:
+WRONG - Do not include explanatory text:
 Here are the results:
 [...]
 
-Example of WRONG output:
+WRONG - Do not include markdown:
 ```json
 [...]
 ```
 
-ONLY return the raw JSON array. Nothing else.
+ONLY return the raw JSON array with no additional text before or after.
 """
 
 
@@ -142,7 +226,31 @@ Artist: {artist_name}
     if artist_field:
         prompt += f"Field: {artist_field}\n"
     
-    prompt += f"\nFind {max_results} high-quality sources (major publications, industry magazines, official websites).\n"
+    # Add criterion-specific filtering instructions
+    if criterion_id == "1":
+        prompt += f"""
+CRITICAL FOR CRITERION 1 (AWARDS):
+- ONLY include sources from official award organization websites
+- For music: grammy.com, opusklassik.de, mercuryprize.com, etc.
+- DO NOT include Forbes, Wikipedia, artist biographies, or news articles
+- DO NOT include third-party coverage of awards
+- MUST be the award organization's own website
+
+REJECT these source types:
+- forbes.com/artist-name
+- wikipedia.org
+- artist-website.com/awards
+- news articles ABOUT awards
+- biography pages
+
+ACCEPT only these source types:
+- grammy.com/awards/winners
+- kennedy-center.org/honors
+- pulitzer.org/winners
+- [award-organization].org/winners
+"""
+    
+    prompt += f"\nFind {max_results} high-quality sources (following the criterion-specific guidance above).\n"
     
     if feedback:
         prompt += f"\nUser feedback: {feedback}\n"
