@@ -424,11 +424,23 @@ def generate_export_zip(package_name: str) -> bytes:
                 
                 # Annotate PDF with approved quotes
                 try:
+                    # Try to extract metadata from the PDF or use stored metadata
+                    from src.metadata import autodetect_metadata
+                    from src.pdf_text import extract_text_from_pdf_bytes
+                    from datetime import datetime
+                    
+                    # Extract text for metadata detection
+                    pdf_text = extract_text_from_pdf_bytes(pdf_bytes)
+                    
+                    # Auto-detect metadata
+                    detected_meta = autodetect_metadata(pdf_text)
+                    
+                    # Build metadata for annotations
                     meta = {
-                        "source_url": "",
-                        "venue_name": "",
-                        "ensemble_name": "",
-                        "performance_date": "",
+                        "source_url": detected_meta.get("source_url", ""),
+                        "venue_name": detected_meta.get("venue_name", ""),
+                        "ensemble_name": detected_meta.get("ensemble_name", ""),
+                        "performance_date": detected_meta.get("performance_date", ""),
                         "beneficiary_name": st.session_state.beneficiary_name,
                         "beneficiary_variants": st.session_state.beneficiary_variants,
                     }
@@ -437,7 +449,8 @@ def generate_export_zip(package_name: str) -> bytes:
                         pdf_bytes=pdf_bytes,
                         quote_terms=approved_quotes,
                         criterion_id=cid,
-                        meta=meta
+                        meta=meta,
+                        current_date=datetime.now()  # For past/future detection
                     )
                     
                     # Add annotated PDF to ZIP
