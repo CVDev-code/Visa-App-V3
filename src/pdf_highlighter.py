@@ -37,6 +37,11 @@ MIN_ANNOTATION_SPACING = 25.0   # Minimum vertical gap between annotations
 MAX_ANNOTATION_DRIFT = 50.0     # Max distance from ideal Y position
 OVERLAP_TOLERANCE = 2.0         # Extra padding to detect overlaps
 
+# Connector density knobs (avoid clutter)
+MAX_CONNECTORS_PER_PAGE = 3
+MAX_TOTAL_CONNECTORS = 12
+MIN_CONNECTOR_VERTICAL_SPACING = 40.0
+
 # Arrowhead (DISABLED by setting to 0)
 ARROW_LEN = 0.0  # Changed from 9.0 to 0.0 to disable arrowheads
 ARROW_HALF_WIDTH = 0.0  # Changed from 4.5 to 0.0
@@ -743,6 +748,53 @@ def _draw_multipage_connector(
         _draw_arrowhead(target_page, fitz.Point(margin_x, end.y), end)
 
 
+def _select_targets_for_connectors(
+    targets_by_page: Dict[int, List[fitz.Rect]],
+    *,
+    policy: str,
+) -> Dict[int, List[fitz.Rect]]:
+    """
+    Select connector targets to reduce clutter while keeping coverage.
+    """
+    selected: Dict[int, List[fitz.Rect]] = {}
+    total = 0
+
+    if policy == "page_first":
+        for pi in sorted(targets_by_page.keys()):
+            rects = sorted(targets_by_page[pi], key=lambda r: (r.y0, r.x0))
+            if rects:
+                selected[pi] = [rects[0]]
+                total += 1
+            if total >= MAX_TOTAL_CONNECTORS:
+                break
+        return selected
+
+    # policy == "all"
+    for pi in sorted(targets_by_page.keys()):
+        rects = sorted(targets_by_page[pi], key=lambda r: (r.y0, r.x0))
+        page_selected: List[fitz.Rect] = []
+        last_y: Optional[float] = None
+
+        for r in rects:
+            if last_y is not None and abs(r.y0 - last_y) < MIN_CONNECTOR_VERTICAL_SPACING:
+                continue
+
+            page_selected.append(r)
+            last_y = r.y0
+
+            if len(page_selected) >= MAX_CONNECTORS_PER_PAGE:
+                break
+
+        if page_selected:
+            selected[pi] = page_selected
+            total += len(page_selected)
+
+        if total >= MAX_TOTAL_CONNECTORS:
+            break
+
+    return selected
+
+
 # ============================================================
 # Main annotation function
 # ============================================================
@@ -1021,24 +1073,9 @@ def annotate_pdf_bytes(
     
     # Apply criterion-specific annotation to first quote term if we have one
     if criterion_label and first_quote_targets_by_page:
-        # Find first occurrence (same logic as metadata)
-        boxed_any = False
-        annotated_targets_by_page: Dict[int, List[fitz.Rect]] = {}
-        
-        for pi in sorted(first_quote_targets_by_page.keys()):
-            if boxed_any:
-                break
-            
-            page_quote_boxes = quote_hits_by_page.get(pi, [])
-            
-            for r in first_quote_targets_by_page[pi]:
-                # The quote is already boxed from the highlighting phase above
-                # We just need to add an annotation for it
-                # Keep ONLY this occurrence for annotation
-                annotated_targets_by_page[pi] = [r]
-                boxed_any = True
-                break
-        
+        # Use ALL occurrences of the first quote term for connectors
+        annotated_targets_by_page: Dict[int, List[fitz.Rect]] = dict(first_quote_targets_by_page)
+
         if annotated_targets_by_page:
             # Place the criterion annotation
             if 0 in annotated_targets_by_page:
@@ -1086,7 +1123,7 @@ def annotate_pdf_bytes(
                 connectors_to_draw.append(
                     {
                         "final_rect": final_rect,
-                        "connect_policy": "all",
+                        "connect_policy": "page_first",
                         "targets_by_page": annotated_targets_by_page,
                     }
                 )
@@ -1148,6 +1185,12 @@ def annotate_pdf_bytes(
         # Draw connectors to ALL targets across pages, routed down margins if needed.
         # NOTE: callout is always on page 0.
         callout_page_index = 0
+
+        if connect_policy in {"all", "page_first"}:
+            targets_by_page = _select_targets_for_connectors(
+                targets_by_page,
+                policy=connect_policy,
+            )
 
         for pi, rects in targets_by_page.items():
             if connect_policy == "single" and rects:
