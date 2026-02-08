@@ -25,6 +25,7 @@ def init_session_state():
         # Tab 1: Research results by criterion
         "research_results": {},      # {cid: [{url, title, excerpt, source}, ...]}
         "research_approvals": {},    # {cid: {url: True/False, ...}}
+        "skip_highlighting": {},     # {cid: {filename: True/False, ...}} - True = skip highlighting
         
         # Tab 2: PDFs and highlights by criterion  
         "criterion_pdfs": {},        # {cid: {filename: bytes, ...}}
