@@ -175,14 +175,16 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
         col1, col2, col3 = st.columns([1, 1, 2])
         with col1:
             if st.button("✅ Approve All", key=f"approve_all_{cid}"):
-                for item in results:
+                for i, item in enumerate(results):
                     st.session_state.research_approvals[cid][item['url']] = True
+                    st.session_state[f"approve_{cid}_{i}"] = True
                 st.rerun()
         
         with col2:
             if st.button("❌ Reject All", key=f"reject_all_{cid}"):
-                for item in results:
+                for i, item in enumerate(results):
                     st.session_state.research_approvals[cid][item['url']] = False
+                    st.session_state[f"approve_{cid}_{i}"] = False
                 st.rerun()
         
         with col3:
