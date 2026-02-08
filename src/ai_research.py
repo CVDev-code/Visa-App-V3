@@ -81,21 +81,35 @@ def _search_with_vertex_ai(
     try:
         import streamlit as st
         from google.oauth2 import service_account
+        import json
         
-        if "GOOGLE_APPLICATION_CREDENTIALS_JSON" not in st.secrets:
+        # Try as JSON string first (recommended)
+        if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in st.secrets:
+            creds_value = st.secrets["GOOGLE_APPLICATION_CREDENTIALS_JSON"]
+            
+            # If it's a string, parse it as JSON
+            if isinstance(creds_value, str):
+                creds_dict = json.loads(creds_value)
+            # If it's already a dict (from TOML section), use it
+            else:
+                creds_dict = dict(creds_value)
+                
+            credentials = service_account.Credentials.from_service_account_info(creds_dict)
+            print("[Vertex AI] Successfully loaded credentials from Streamlit secrets")
+        else:
             raise RuntimeError(
                 "GOOGLE_APPLICATION_CREDENTIALS_JSON not found in Streamlit secrets.\n"
                 "Add your service account JSON to secrets."
             )
-        
-        # Convert TOML section to dict
-        creds_dict = dict(st.secrets["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
-        credentials = service_account.Credentials.from_service_account_info(creds_dict)
-        print("[Vertex AI] Successfully loaded credentials from Streamlit secrets")
     except ImportError:
         raise RuntimeError(
             "Running outside Streamlit - cannot load credentials.\n"
             "Set GOOGLE_APPLICATION_CREDENTIALS environment variable."
+        )
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Failed to parse JSON credentials: {e}\n\n"
+            "Make sure GOOGLE_APPLICATION_CREDENTIALS_JSON contains valid JSON."
         )
     except Exception as e:
         raise RuntimeError(
