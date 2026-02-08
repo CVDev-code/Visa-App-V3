@@ -32,7 +32,19 @@ def render_highlight_tab():
         """)
         return
     
-    st.success(f"📄 **{total_pdfs} PDF(s) ready** to highlight")
+    # Count PDFs marked to skip highlighting
+    skip_count = sum(
+        1 for cid_data in st.session_state.highlight_results.values()
+        for doc_data in cid_data.values()
+        if doc_data.get('skip_highlighting', False)
+    )
+    
+    highlight_count = total_pdfs - skip_count
+    
+    if skip_count > 0:
+        st.success(f"📄 **{total_pdfs} PDF(s) ready** ({highlight_count} to highlight, {skip_count} to skip)")
+    else:
+        st.success(f"📄 **{total_pdfs} PDF(s) ready** to highlight")
     
     # Highlight all button
     if st.button("✨ Highlight All Criteria", type="primary", use_container_width=True):
@@ -160,6 +172,7 @@ def render_pdf_highlights(cid: str, filename: str, data: dict):
     
     quotes_by_criterion = data.get('quotes', {})
     notes = data.get('notes', '')
+    skip_highlighting = data.get('skip_highlighting', False)
     
     # Initialize approvals in session state if needed
     if cid not in st.session_state.highlight_approvals:
@@ -174,7 +187,16 @@ def render_pdf_highlights(cid: str, filename: str, data: dict):
     total_quotes = sum(len(quotes) for quotes in quotes_by_criterion.values())
     approved_quotes = sum(1 for ok in file_approvals.values() if ok)
     
-    st.markdown(f"**📄 {filename}** ({total_quotes} quotes, {approved_quotes} approved)")
+    # Show different header if skip_highlighting
+    if skip_highlighting:
+        st.markdown(f"**📄 {filename}** 🔒 _Included as-is (no highlighting)_")
+    else:
+        st.markdown(f"**📄 {filename}** ({total_quotes} quotes, {approved_quotes} approved)")
+    
+    if skip_highlighting:
+        st.caption("✓ This document was marked to skip highlighting and will be included in the export without annotations.")
+        st.markdown("---")
+        return
     
     if total_quotes == 0:
         st.caption("No quotes found in this document")
@@ -256,6 +278,9 @@ def highlight_criterion(cid: str, show_progress: bool = True):
     if cid not in st.session_state.highlight_results:
         st.session_state.highlight_results[cid] = {}
     
+    # Get skip_highlighting flags
+    skip_flags = st.session_state.skip_highlighting.get(cid, {})
+    
     if show_progress:
         progress_bar = st.progress(0)
         status = st.empty()
@@ -263,6 +288,24 @@ def highlight_criterion(cid: str, show_progress: bool = True):
     processed = 0
     
     for filename, pdf_bytes in pdfs.items():
+        # Check if this document should skip highlighting
+        if skip_flags.get(filename, False):
+            if show_progress:
+                status.text(f"Skipping {filename} (marked as no highlighting)...")
+            
+            # Store as-is without highlighting
+            st.session_state.highlight_results[cid][filename] = {
+                'quotes': {},  # Empty quotes
+                'notes': 'Document marked to skip highlighting - included as-is',
+                'pdf_bytes': pdf_bytes,
+                'skip_highlighting': True  # Flag for export
+            }
+            
+            processed += 1
+            if show_progress:
+                progress_bar.progress(processed / len(pdfs))
+            continue
+        
         if show_progress:
             status.text(f"Analyzing {filename}...")
         
@@ -284,7 +327,8 @@ def highlight_criterion(cid: str, show_progress: bool = True):
             st.session_state.highlight_results[cid][filename] = {
                 'quotes': result.get('by_criterion', {}),
                 'notes': result.get('notes', ''),
-                'pdf_bytes': pdf_bytes
+                'pdf_bytes': pdf_bytes,
+                'skip_highlighting': False
             }
         
         except Exception as e:
@@ -425,12 +469,21 @@ def generate_export_zip(package_name: str) -> bytes:
                                 
                                 if file_approvals.get(quote_key, True):  # Default approve
                                     approved_quotes.append(quote_text)
+                # Check if this document should skip highlighting
+                skip_highlight = data.get('skip_highlighting', False)
                 
                 # If no approvals tracked, use all quotes
-                if not approved_quotes:
+                if not approved_quotes and not skip_highlight:
                     for criterion_id, quote_list in quotes_dict.items():
                         for quote_data in quote_list:
                             approved_quotes.append(quote_data.get('quote', ''))
+                
+                # Handle skip_highlighting flag
+                if skip_highlight:
+                    # Include original PDF without annotation
+                    zip_path = f"{package_name}/{folder_name}/{filename}"
+                    zip_file.writestr(zip_path, pdf_bytes)
+                    continue
                 
                 # Annotate PDF with approved quotes
                 try:
