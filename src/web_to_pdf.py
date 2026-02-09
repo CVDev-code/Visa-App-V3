@@ -20,6 +20,9 @@ import os
 from typing import Dict, Optional, Tuple, List
 from datetime import datetime
 
+MIN_CONTENT_CHARS = 200
+PLAYWRIGHT_TIMEOUT_MS = 20000
+
 
 # ============================================================
 # Translation Support
@@ -135,6 +138,131 @@ def _detect_and_translate_content(content: str, html_content: str = "") -> Tuple
         return content, False
 
 
+def _fetch_html_with_playwright(url: str) -> str:
+    """
+    Fetch fully-rendered HTML using Playwright (for JS-heavy pages).
+    Returns empty string if Playwright isn't available or fails.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        print("[Playwright] Not installed - JS rendering disabled")
+        print("[Playwright] Install with: pip install playwright")
+        print("[Playwright] Then run: python -m playwright install chromium")
+        return ""
+    
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800}
+            )
+            page.goto(url, wait_until="networkidle", timeout=PLAYWRIGHT_TIMEOUT_MS)
+            html = page.content()
+            browser.close()
+            return html or ""
+    except Exception as e:
+        print(f"[Playwright] Failed to render {url}: {e}")
+        return ""
+
+
+def _extract_with_bs4_html(html: str, url: str, translate_to_english: bool) -> Dict[str, str]:
+    """
+    Extract content from HTML using BeautifulSoup with aggressive cleaning.
+    """
+    from bs4 import BeautifulSoup
+    
+    soup = BeautifulSoup(html, 'html.parser')
+    
+    # Extract publication logo
+    publication_logo = _extract_publication_logo(soup, url)
+    footer_logo = _extract_footer_logo(soup, url)
+    font_family = _detect_article_font(soup)
+    
+    # Extract title
+    title_tag = soup.find('title') or soup.find('h1')
+    title = title_tag.get_text().strip() if title_tag else "Untitled"
+    
+    # Remove scripts, styles, navigation, ads, etc.
+    for tag in soup(['script', 'style', 'nav', 'footer', 'aside', 'iframe', 'header']):
+        tag.decompose()
+    
+    # Remove common junk classes/IDs
+    junk_selectors = [
+        {'class': ['nav', 'navigation', 'navbar', 'menu', 'sidebar', 'widget']},
+        {'class': ['breadcrumb', 'breadcrumbs', 'tags', 'categories']},
+        {'class': ['share', 'social', 'comments', 'related']},
+        {'class': ['ad', 'ads', 'advertisement', 'promo']},
+        {'class': ['meta', 'metadata', 'byline']},
+        {'id': ['nav', 'navigation', 'sidebar', 'footer', 'header']},
+    ]
+    
+    for selector in junk_selectors:
+        for tag in soup.find_all(**selector):
+            tag.decompose()
+    
+    # Get main content
+    main_content = (
+        soup.find('article') or 
+        soup.find('main') or 
+        soup.find('div', class_=['content', 'article', 'post', 'entry-content']) or
+        soup.find('body')
+    )
+    
+    if main_content:
+        # Extract images with captions
+        images = _extract_images_with_captions(main_content, url, limit=2)
+        
+        # Extract paragraphs for proper structure
+        paragraphs = main_content.find_all('p')
+        if paragraphs:
+            content_parts = []
+            
+            # Add first image
+            if images:
+                img_html = f'<img src="{images[0]["src"]}" alt="Article image">'
+                if images[0].get('caption'):
+                    img_html += f'\n<figcaption>{images[0]["caption"]}</figcaption>'
+                content_parts.append(img_html)
+            
+            # Add paragraphs
+            for p in paragraphs:
+                p_text = p.get_text().strip()
+                if p_text:
+                    content_parts.append(p_text)
+            
+            content = '\n\n'.join(content_parts)
+        else:
+            content = main_content.get_text(separator='\n\n').strip()
+    else:
+        content = ""
+    
+    # Clean up: remove multiple blank lines
+    import re
+    content = re.sub(r'\n{3,}', '\n\n', content)
+    
+    # Translate if needed
+    if translate_to_english and content:
+        content, was_translated = _detect_and_translate_content(content, str(soup))
+        if was_translated:
+            print(f"[Translation] Content translated to English")
+    
+    return {
+        "title": title,
+        "author": "",
+        "date": "",
+        "content": content,
+        "url": url,
+        "publication_logo": publication_logo,
+        "footer_logo": footer_logo,
+        "font_family": font_family,
+        "raw_html": str(soup)
+    }
+
+
 def fetch_webpage_content(url: str, translate_to_english: bool = True) -> Dict[str, str]:
     """
     Fetch and extract clean content from a webpage.
@@ -239,6 +367,12 @@ def fetch_webpage_content(url: str, translate_to_english: bool = True) -> Dict[s
             content, was_translated = _detect_and_translate_content(content, article.html)
             if was_translated:
                 print(f"[Translation] Content translated to English")
+
+        # If content is thin, try JS-rendered HTML via Playwright
+        if not content or len(content.strip()) < MIN_CONTENT_CHARS:
+            html = _fetch_html_with_playwright(url)
+            if html:
+                return _extract_with_bs4_html(html, url, translate_to_english)
         
         return {
             "title": article.title or "Untitled",
@@ -255,99 +389,20 @@ def fetch_webpage_content(url: str, translate_to_english: bool = True) -> Dict[s
         print(f"[newspaper3k failed] {e}, trying BeautifulSoup...")
         # Fallback to BeautifulSoup with aggressive cleaning
         try:
-            from bs4 import BeautifulSoup
             import requests
-            from urllib.parse import urljoin
             
             response = requests.get(url, timeout=10, headers={
                 'User-Agent': 'Mozilla/5.0 (compatible; O1VisaBot/1.0)'
             })
-            soup = BeautifulSoup(response.content, 'html.parser')
+            result = _extract_with_bs4_html(response.content, url, translate_to_english)
             
-            # Extract publication logo
-            publication_logo = _extract_publication_logo(soup, url)
-            footer_logo = _extract_footer_logo(soup, url)
-            font_family = _detect_article_font(soup)
+            # If content is thin, try JS-rendered HTML via Playwright
+            if not result.get("content") or len(result["content"].strip()) < MIN_CONTENT_CHARS:
+                html = _fetch_html_with_playwright(url)
+                if html:
+                    return _extract_with_bs4_html(html, url, translate_to_english)
             
-            # Extract title
-            title_tag = soup.find('title') or soup.find('h1')
-            title = title_tag.get_text().strip() if title_tag else "Untitled"
-            
-            # Remove scripts, styles, navigation, ads, etc.
-            for tag in soup(['script', 'style', 'nav', 'footer', 'aside', 'iframe', 'header']):
-                tag.decompose()
-            
-            # Remove common junk classes/IDs
-            junk_selectors = [
-                {'class': ['nav', 'navigation', 'navbar', 'menu', 'sidebar', 'widget']},
-                {'class': ['breadcrumb', 'breadcrumbs', 'tags', 'categories']},
-                {'class': ['share', 'social', 'comments', 'related']},
-                {'class': ['ad', 'ads', 'advertisement', 'promo']},
-                {'class': ['meta', 'metadata', 'byline']},
-                {'id': ['nav', 'navigation', 'sidebar', 'footer', 'header']},
-            ]
-            
-            for selector in junk_selectors:
-                for tag in soup.find_all(**selector):
-                    tag.decompose()
-            
-            # Get main content
-            main_content = (
-                soup.find('article') or 
-                soup.find('main') or 
-                soup.find('div', class_=['content', 'article', 'post', 'entry-content']) or
-                soup.find('body')
-            )
-            
-            if main_content:
-                # Extract images with captions
-                images = _extract_images_with_captions(main_content, url, limit=2)
-                
-                # Extract paragraphs for proper structure
-                paragraphs = main_content.find_all('p')
-                if paragraphs:
-                    content_parts = []
-                    
-                    # Add first image
-                    if images:
-                        img_html = f'<img src="{images[0]["src"]}" alt="Article image">'
-                        if images[0].get('caption'):
-                            img_html += f'\n<figcaption>{images[0]["caption"]}</figcaption>'
-                        content_parts.append(img_html)
-                    
-                    # Add paragraphs
-                    for p in paragraphs:
-                        p_text = p.get_text().strip()
-                        if p_text:
-                            content_parts.append(p_text)
-                    
-                    content = '\n\n'.join(content_parts)
-                else:
-                    content = main_content.get_text(separator='\n\n').strip()
-            else:
-                content = ""
-            
-            # Clean up: remove multiple blank lines
-            import re
-            content = re.sub(r'\n{3,}', '\n\n', content)
-            
-            # Translate if needed
-            if translate_to_english and content:
-                content, was_translated = _detect_and_translate_content(content, str(soup))
-                if was_translated:
-                    print(f"[Translation] Content translated to English")
-            
-            return {
-                "title": title,
-                "author": "",
-                "date": "",
-                "content": content,
-                "url": url,
-                "publication_logo": publication_logo,
-                "footer_logo": footer_logo,
-                "font_family": font_family,
-                "raw_html": str(soup)
-            }
+            return result
         except Exception as e2:
             raise RuntimeError(f"Failed to fetch {url}: {e2}")
 
