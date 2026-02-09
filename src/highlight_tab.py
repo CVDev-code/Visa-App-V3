@@ -436,6 +436,15 @@ def render_export_section():
             with st.expander("Error details"):
                 st.code(traceback.format_exc())
 
+    st.divider()
+    nav_col1, nav_col2 = st.columns(2)
+    with nav_col1:
+        if st.button("← Back", key="nav_back_highlight", use_container_width=True):
+            st.session_state["goto_tab"] = "research"
+            st.rerun()
+    with nav_col2:
+        st.button("Next Page →", key="nav_next_highlight", disabled=True, use_container_width=True)
+
 
 def generate_export_zip(package_name: str) -> bytes:
     """Generate ZIP with criterion subfolders and ANNOTATED PDFs"""
