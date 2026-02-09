@@ -864,11 +864,18 @@ def _draw_multipage_connector(
         bottom_point = fitz.Point(margin_x, p.rect.height - EDGE_PAD)
         p.draw_line(top_point, bottom_point, color=RED, width=LINE_WIDTH)
 
-    # Draw on target page: trunk + branch from trunk head
+    # Draw on target page
     top_point = fitz.Point(margin_x, EDGE_PAD)
     bottom_point = fitz.Point(margin_x, target_page.rect.height - EDGE_PAD)
-    target_page.draw_line(top_point, bottom_point, color=RED, width=LINE_WIDTH)
-    target_page.draw_line(top_point, end, color=RED, width=LINE_WIDTH)
+    if target_page_idx < doc.page_count - 1:
+        # Continue trunk only if there are more pages
+        target_page.draw_line(top_point, bottom_point, color=RED, width=LINE_WIDTH)
+        branch_start = top_point
+    else:
+        # Last page: branch starts at trunk entry point only
+        branch_start = top_point
+
+    target_page.draw_line(branch_start, end, color=RED, width=LINE_WIDTH)
     
     # Draw arrowhead only if enabled
     if ARROW_LEN > 0:
@@ -1329,24 +1336,23 @@ def annotate_pdf_bytes(
 
             if connect_policy == "page_best":
                 if pi == 0:
-                    start, callout_left, margin_x = _compute_trunk_start(final_rect, page1.rect)
                     red_boxes = quote_hits_by_page.get(0, [])
                     best = _choose_best_target_on_page(
                         page=page1,
                         candidates=rects,
-                        margin_x=margin_x,
-                        callout_left=callout_left,
+                        margin_x=EDGE_PAD,
+                        callout_left=final_rect.x0 < page1.rect.width / 2,
                         avoid_rects=red_boxes,
                     )
                     if best is not None:
-                        end = _end_point_from_start(start, best)
+                        s, e = _edge_to_edge_points(final_rect, best)
                         obstacles = quote_hits_by_page.get(0, []) + occupied_callouts
                         obstacles = [
                             o for o in obstacles
                             if not o.intersects(inflate_rect(best, OVERLAP_TOLERANCE))
                         ]
                         obstacles = [o for o in obstacles if not o.intersects(final_rect)]
-                        _draw_routed_line(page1, start, end, obstacles)
+                        _draw_routed_line(page1, s, e, obstacles)
                 else:
                     target_page = doc.load_page(pi)
                     callout_page = doc.load_page(callout_page_index)
