@@ -812,6 +812,7 @@ def _draw_multipage_connector(
     target_rect: fitz.Rect,
     *,
     occupied_callouts: Optional[List[fitz.Rect]] = None,
+    last_target_page_idx: Optional[int] = None,
 ):
     """
     Draw a connector from a callout on one page to a target on another page.
@@ -867,7 +868,10 @@ def _draw_multipage_connector(
     # Draw on target page
     top_point = fitz.Point(margin_x, EDGE_PAD)
     bottom_point = fitz.Point(margin_x, target_page.rect.height - EDGE_PAD)
-    if target_page_idx < doc.page_count - 1:
+    if last_target_page_idx is None:
+        last_target_page_idx = target_page_idx
+
+    if target_page_idx < last_target_page_idx:
         # Continue trunk only if there are more pages
         target_page.draw_line(top_point, bottom_point, color=RED, width=LINE_WIDTH)
         branch_start = top_point
@@ -1319,6 +1323,7 @@ def annotate_pdf_bytes(
         final_rect = item["final_rect"]
         targets_by_page = item["targets_by_page"]
         connect_policy = item["connect_policy"]
+        last_target_page_idx = max(targets_by_page.keys()) if targets_by_page else 0
 
         # Draw connectors to ALL targets across pages, routed down margins if needed.
         # NOTE: callout is always on page 0.
@@ -1376,6 +1381,7 @@ def annotate_pdf_bytes(
                             pi,
                             best,
                             occupied_callouts=occupied_callouts,
+                            last_target_page_idx=last_target_page_idx,
                         )
             else:
                 for r in rects:
@@ -1401,6 +1407,7 @@ def annotate_pdf_bytes(
                             pi,
                             r,
                             occupied_callouts=occupied_callouts,
+                            last_target_page_idx=last_target_page_idx,
                         )
 
     out = io.BytesIO()
