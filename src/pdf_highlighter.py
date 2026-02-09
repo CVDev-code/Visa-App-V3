@@ -42,6 +42,7 @@ MAX_CONNECTORS_PER_PAGE = 3
 MAX_TOTAL_CONNECTORS = 12
 MIN_CONNECTOR_VERTICAL_SPACING = 40.0
 CONNECTOR_ANGLE_OFFSET = 6.0
+MIN_ANGLE_LENGTH = 40.0
 
 # Arrowhead (DISABLED by setting to 0)
 ARROW_LEN = 0.0  # Changed from 9.0 to 0.0 to disable arrowheads
@@ -236,6 +237,64 @@ def _offset_point_outside_rect(p: fitz.Point, rect: fitz.Rect, pad: float = 1.5)
     if abs(p.y - rect.y1) < 0.1:
         return fitz.Point(p.x, p.y + pad)
     return p
+
+
+def _angle_offset_for_length(length: float) -> float:
+    return max(4.0, min(12.0, length / 20.0))
+
+
+def _choose_callout_margin_side(callout_rect: fitz.Rect, page_rect: fitz.Rect) -> Tuple[bool, float, float]:
+    left_margin_x = EDGE_PAD
+    right_margin_x = page_rect.width - EDGE_PAD
+    dist_left = max(0.0, callout_rect.x0 - left_margin_x)
+    dist_right = max(0.0, right_margin_x - callout_rect.x1)
+    callout_left = dist_left <= dist_right
+    return callout_left, left_margin_x, right_margin_x
+
+
+def _choose_best_target_on_page(
+    *,
+    page: fitz.Page,
+    candidates: List[fitz.Rect],
+    margin_x: float,
+    callout_left: bool,
+    avoid_rects: List[fitz.Rect],
+) -> Optional[fitz.Rect]:
+    if not candidates:
+        return None
+
+    best = None
+    best_hits = None
+    best_len = None
+
+    ordered = sorted(candidates, key=lambda r: (r.y0, r.x0))
+    for r in ordered:
+        end_x = r.x0 if callout_left else r.x1
+        end_y = (r.y0 + r.y1) / 2.0
+        length = abs(end_x - margin_x)
+
+        offset = _angle_offset_for_length(length) if length > MIN_ANGLE_LENGTH else 0.0
+        approach_y = max(EDGE_PAD + 2.0, end_y - offset) if offset > 0 else end_y
+
+        start = fitz.Point(margin_x, approach_y)
+        end = fitz.Point(end_x, end_y)
+
+        hits = 0
+        for obs in avoid_rects:
+            if obs is r:
+                continue
+            if _segment_hits_rect(start, end, inflate_rect(obs, 1.5)):
+                hits += 1
+
+        if best is None or hits < best_hits or (hits == best_hits and length < best_len):
+            best = r
+            best_hits = hits
+            best_len = length
+
+        if hits == 0:
+            break
+
+    return best if best is not None else ordered[0]
 
 
 def _pull_back_point(from_pt: fitz.Point, to_pt: fitz.Point, dist: float) -> fitz.Point:
@@ -622,12 +681,16 @@ def _edge_to_edge_points(r1: fitz.Rect, r2: fitz.Rect) -> Tuple[fitz.Point, fitz
 
     p1, p2 = best_p1, best_p2
 
-    # Avoid perfectly horizontal lines that look like strike-throughs
-    if abs(p1.y - p2.y) < 1.0:
-        if p2.y + CONNECTOR_ANGLE_OFFSET <= r2.y1 - 1.0:
-            p2 = fitz.Point(p2.x, p2.y + CONNECTOR_ANGLE_OFFSET)
-        elif p2.y - CONNECTOR_ANGLE_OFFSET >= r2.y0 + 1.0:
-            p2 = fitz.Point(p2.x, p2.y - CONNECTOR_ANGLE_OFFSET)
+    # Only add angle for long horizontals; always slope downward
+    if abs(p1.y - p2.y) < 1.0 and abs(p2.x - p1.x) > MIN_ANGLE_LENGTH:
+        offset = _angle_offset_for_length(abs(p2.x - p1.x))
+        desired_end_y = min(r2.y1 - 1.0, p2.y + offset)
+        if desired_end_y > p1.y + 0.5:
+            p2 = fitz.Point(p2.x, desired_end_y)
+        else:
+            new_start_y = max(r1.y0 + 1.0, p1.y - offset)
+            if p2.y > new_start_y + 0.5:
+                p1 = fitz.Point(p1.x, new_start_y)
 
     return p1, p2
 
@@ -737,11 +800,9 @@ def _draw_multipage_connector(
     target_page = doc.load_page(target_page_idx)
 
     # Start from bottom edge on nearest margin-facing side
-    left_margin_x = EDGE_PAD
-    right_margin_x = callout_page.rect.width - EDGE_PAD
-    dist_left = max(0.0, callout_rect.x0 - left_margin_x)
-    dist_right = max(0.0, right_margin_x - callout_rect.x1)
-    callout_left = dist_left <= dist_right
+    callout_left, left_margin_x, right_margin_x = _choose_callout_margin_side(
+        callout_rect, callout_page.rect
+    )
     start_x = callout_rect.x0 - 1.5 if callout_left else callout_rect.x1 + 1.5
     start_y = min(callout_rect.y1 - 1.0, callout_page.rect.height - EDGE_PAD - 2.0)
     start = fitz.Point(start_x, start_y)
@@ -751,17 +812,17 @@ def _draw_multipage_connector(
         margin_x = left_margin_x
         end_x = target_rect.x0
     else:
-        margin_x = target_page.rect.width - EDGE_PAD
+        margin_x = right_margin_x
         end_x = target_rect.x1
 
     # End at target (offset to avoid perfectly horizontal lines)
     target_center = _center(target_rect)
     end = fitz.Point(end_x, target_center.y)
-    if abs(end.y - start.y) < 1.0:
-        if end.y + CONNECTOR_ANGLE_OFFSET <= target_rect.y1 - 1.0:
-            end = fitz.Point(end.x, end.y + CONNECTOR_ANGLE_OFFSET)
-        elif end.y - CONNECTOR_ANGLE_OFFSET >= target_rect.y0 + 1.0:
-            end = fitz.Point(end.x, end.y - CONNECTOR_ANGLE_OFFSET)
+    if abs(end.y - start.y) < 1.0 and abs(end.x - start.x) > MIN_ANGLE_LENGTH:
+        offset = _angle_offset_for_length(abs(end.x - start.x))
+        desired_end_y = min(target_rect.y1 - 1.0, end.y + offset)
+        if desired_end_y > start.y + 0.5:
+            end = fitz.Point(end.x, desired_end_y)
 
     # Draw vertical line to bottom of callout page
     obstacles = occupied_callouts or []
@@ -788,9 +849,10 @@ def _draw_multipage_connector(
 
     # Draw on target page
     top_point = fitz.Point(margin_x, EDGE_PAD)
-    approach = fitz.Point(margin_x, end.y + CONNECTOR_ANGLE_OFFSET)
+    offset = _angle_offset_for_length(abs(end.x - margin_x))
+    approach = fitz.Point(margin_x, end.y - offset)
     if approach.y < EDGE_PAD + 2.0 or approach.y > target_page.rect.height - EDGE_PAD - 2.0:
-        approach = fitz.Point(margin_x, end.y - CONNECTOR_ANGLE_OFFSET)
+        approach = fitz.Point(margin_x, end.y)
     target_page.draw_line(top_point, approach, color=RED, width=LINE_WIDTH)
     target_page.draw_line(approach, end, color=RED, width=LINE_WIDTH)
     
@@ -1125,17 +1187,11 @@ def annotate_pdf_bytes(
     if criterion_label and quote_targets_by_term:
         # Connect only the first quote occurrence per page (across all terms)
         annotated_targets_by_page: Dict[int, List[fitz.Rect]] = {}
-        all_targets_by_page: Dict[int, List[fitz.Rect]] = {}
-
-        for _term, targets_by_page in quote_targets_by_term.items():
-            for pi, rects in targets_by_page.items():
-                all_targets_by_page.setdefault(pi, []).extend(rects)
-
-        for pi, rects in all_targets_by_page.items():
+        for pi, rects in quote_hits_by_page.items():
             rects = _dedupe_rects(rects, pad=1.0)
             rects = sorted(rects, key=lambda r: (r.y0, r.x0))
             if rects:
-                annotated_targets_by_page[pi] = [rects[0]]
+                annotated_targets_by_page[pi] = rects
 
         if annotated_targets_by_page:
             # Place the criterion annotation
@@ -1184,7 +1240,7 @@ def annotate_pdf_bytes(
                 connectors_to_draw.append(
                     {
                         "final_rect": final_rect,
-                        "connect_policy": "explicit",
+                        "connect_policy": "page_best",
                         "targets_by_page": annotated_targets_by_page,
                     }
                 )
@@ -1273,6 +1329,24 @@ def annotate_pdf_bytes(
                     # Use smart routing
                     _draw_routed_line(page1, s, e, obstacles)
                 else:
+                    if connect_policy == "page_best":
+                        target_page = doc.load_page(pi)
+                        callout_page = doc.load_page(callout_page_index)
+                        callout_left, left_margin_x, right_margin_x = _choose_callout_margin_side(
+                            final_rect, callout_page.rect
+                        )
+                        margin_x = left_margin_x if callout_left else right_margin_x
+                        red_boxes = quote_hits_by_page.get(pi, [])
+                        best = _choose_best_target_on_page(
+                            page=target_page,
+                            candidates=rects,
+                            margin_x=margin_x,
+                            callout_left=callout_left,
+                            avoid_rects=red_boxes,
+                        )
+                        if best is not None:
+                            r = best
+
                     _draw_multipage_connector(
                         doc,
                         callout_page_index,
