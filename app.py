@@ -4,6 +4,7 @@ O-1 Visa Evidence Assistant
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 from src.prompts import CRITERIA
 
 # Page config
@@ -31,6 +32,7 @@ def init_session_state():
         "criterion_pdfs": {},        # {cid: {filename: bytes, ...}}
         "highlight_results": {},     # {cid: {filename: {quotes: {...}, notes: ""}, ...}}
         "highlight_approvals": {},   # {cid: {filename: {quote_text: True/False, ...}}}
+        "goto_tab": None,            # "research" or "highlight" to trigger tab switch
     }
     
     for key, default in defaults.items():
@@ -97,3 +99,22 @@ with tab1:
 with tab2:
     from src.highlight_tab import render_highlight_tab
     render_highlight_tab()
+
+
+# Handle programmatic tab navigation (e.g., "Next Page" / "Back")
+goto_tab = st.session_state.get("goto_tab")
+if goto_tab:
+    tab_index = 0 if goto_tab == "research" else 1
+    components.html(
+        f"""
+        <script>
+        const tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+        if (tabs.length > {tab_index}) {{
+            tabs[{tab_index}].click();
+        }}
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+    st.session_state["goto_tab"] = None
