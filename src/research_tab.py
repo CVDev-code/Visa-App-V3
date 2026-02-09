@@ -335,6 +335,15 @@ def render_research_summary():
         with st.spinner(f"Processing {total_approved} sources..."):
             convert_approved_to_pdfs()
 
+    st.divider()
+    nav_col1, nav_col2 = st.columns(2)
+    with nav_col1:
+        st.button("← Back", key="nav_back_research", disabled=True, use_container_width=True)
+    with nav_col2:
+        if st.button("Next Page →", key="nav_next_research", use_container_width=True):
+            st.session_state["goto_tab"] = "highlight"
+            st.rerun()
+
 
 def convert_approved_to_pdfs():
     """Convert all approved sources to PDFs"""
