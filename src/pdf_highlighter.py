@@ -736,15 +736,19 @@ def _draw_multipage_connector(
     callout_page = doc.load_page(callout_page_idx)
     target_page = doc.load_page(target_page_idx)
 
-    # Start from bottom edge of callout (avoid crossing annotation text)
-    callout_left = callout_rect.x0 < callout_page.rect.width / 2
-    start_x = callout_rect.x1 + 1.5 if callout_left else callout_rect.x0 - 1.5
+    # Start from bottom edge on nearest margin-facing side
+    left_margin_x = EDGE_PAD
+    right_margin_x = callout_page.rect.width - EDGE_PAD
+    dist_left = max(0.0, callout_rect.x0 - left_margin_x)
+    dist_right = max(0.0, right_margin_x - callout_rect.x1)
+    callout_left = dist_left <= dist_right
+    start_x = callout_rect.x0 - 1.5 if callout_left else callout_rect.x1 + 1.5
     start_y = min(callout_rect.y1 - 1.0, callout_page.rect.height - EDGE_PAD - 2.0)
     start = fitz.Point(start_x, start_y)
 
     # Choose a consistent margin side based on callout position
     if callout_left:
-        margin_x = EDGE_PAD
+        margin_x = left_margin_x
         end_x = target_rect.x0
     else:
         margin_x = target_page.rect.width - EDGE_PAD
