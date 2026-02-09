@@ -589,6 +589,48 @@ def _dedupe_rects(rects: List[fitz.Rect], pad: float = 1.0) -> List[fitz.Rect]:
     return out
 
 
+def _merge_rects_per_line(
+    rects: List[fitz.Rect],
+    *,
+    y_tol: float = 2.0,
+    x_gap: float = 3.0,
+) -> List[fitz.Rect]:
+    """
+    Merge adjacent rects on the same line into a single box.
+    """
+    if not rects:
+        return []
+
+    rects = sorted(rects, key=lambda r: (r.y0, r.x0))
+    lines: List[List[fitz.Rect]] = []
+
+    for r in rects:
+        y_mid = (r.y0 + r.y1) / 2.0
+        placed = False
+        for group in lines:
+            gy = (group[0].y0 + group[0].y1) / 2.0
+            if abs(y_mid - gy) <= y_tol:
+                group.append(r)
+                placed = True
+                break
+        if not placed:
+            lines.append([r])
+
+    merged: List[fitz.Rect] = []
+    for group in lines:
+        group = sorted(group, key=lambda r: r.x0)
+        cur = fitz.Rect(group[0])
+        for r in group[1:]:
+            if r.x0 <= cur.x1 + x_gap:
+                cur |= r
+            else:
+                merged.append(cur)
+                cur = fitz.Rect(r)
+        merged.append(cur)
+
+    return merged
+
+
 # ============================================================
 # Annotation placement (improved spacing)
 # ============================================================
@@ -1027,6 +1069,7 @@ def annotate_pdf_bytes(
             if rects:
                 quote_targets_by_term.setdefault(term, {}).setdefault(page_index, []).extend(rects)
 
+        page_hits = _merge_rects_per_line(page_hits, y_tol=2.0, x_gap=3.0)
         page_hits = _dedupe_rects(page_hits, pad=1.0)
         if page_hits:
             quote_hits_by_page[page_index] = page_hits
@@ -1038,6 +1081,7 @@ def annotate_pdf_bytes(
     # Deduplicate quote term targets per page per term
     for term, targets_by_page in list(quote_targets_by_term.items()):
         for pi in list(targets_by_page.keys()):
+            targets_by_page[pi] = _merge_rects_per_line(targets_by_page[pi], y_tol=2.0, x_gap=3.0)
             targets_by_page[pi] = _dedupe_rects(targets_by_page[pi], pad=1.0)
 
     # B) Metadata callouts (page 1) — targets can exist on any page now
