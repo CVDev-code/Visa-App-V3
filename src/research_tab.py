@@ -1,6 +1,6 @@
 """
-Research Tab - Tab 1
-Gather evidence with 3 input methods per criterion in dropdown format
+Research Tab - Tab 1 (Document upload)
+Gather evidence with upload and URL paste per criterion in dropdown format
 """
 
 import streamlit as st
@@ -12,8 +12,8 @@ def render_research_tab():
     Main research interface with dropdowns for each criterion
     """
     
-    st.header("🔍 Research & Gather Evidence")
-    st.markdown("Gather sources for each criterion using upload, URLs, or AI agent")
+    st.header("📄 Document upload")
+    st.markdown("Gather sources for each criterion by uploading documents and pasting URLs")
     
     beneficiary_name = st.session_state.beneficiary_name
     
@@ -30,7 +30,7 @@ def render_research_tab():
 
 def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
     """
-    Single criterion research section with 3 input methods + approval
+    Single criterion research section with 2 input methods + approval
     """
     
     # Count current results
@@ -47,11 +47,11 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
     with st.expander(f"📋 **Criterion ({cid}):** {desc} {status}", expanded=is_expanded):
         
         # ========================================
-        # 3 INPUT METHODS
+        # 2 INPUT METHODS
         # ========================================
         st.markdown("### 📥 Gather Sources")
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         
         # METHOD 1: Upload
         with col1:
@@ -87,79 +87,40 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                 
                 st.success(f"✅ {len(uploaded)} file(s)")
         
-        # METHOD 2: URLs
+        # METHOD 2: URLs (add-on-Enter workflow)
         with col2:
             st.markdown("**🔗 Paste URLs**")
-            urls_text = st.text_area(
-                "Enter URLs (one per line)",
-                placeholder="https://example.com/article",
-                height=100,
-                key=f"urls_{cid}",
-                label_visibility="collapsed"
-            )
+            st.caption("Paste one URL, press Enter or click Add, then repeat for more URLs")
             
-            if st.button("Add URLs", key=f"add_urls_{cid}", use_container_width=True):
-                urls = [u.strip() for u in urls_text.split("\n") if u.strip()]
-                
-                if urls:
+            with st.form(key=f"url_form_{cid}"):
+                url_input = st.text_input(
+                    "URL",
+                    placeholder="https://example.com/article",
+                    key=f"url_input_{cid}",
+                    label_visibility="collapsed"
+                )
+                add_clicked = st.form_submit_button("Add")
+            
+            if add_clicked and url_input:
+                url = url_input.strip()
+                if url:
                     if cid not in st.session_state.research_results:
                         st.session_state.research_results[cid] = []
                     if cid not in st.session_state.research_approvals:
                         st.session_state.research_approvals[cid] = {}
                     
-                    for url in urls:
-                        # Check if already added
-                        if not any(r['url'] == url for r in st.session_state.research_results[cid]):
-                            st.session_state.research_results[cid].append({
-                                'url': url,
-                                'title': url.split('/')[-1] or 'Article',
-                                'source': 'URL',
-                                'excerpt': f'Source: {url}'
-                            })
-                            st.session_state.research_approvals[cid][url] = True
-                    
-                    st.success(f"✅ Added {len(urls)} URL(s)")
+                    if not any(r['url'] == url for r in st.session_state.research_results[cid]):
+                        st.session_state.research_results[cid].append({
+                            'url': url,
+                            'title': url.split('/')[-1] or 'Article',
+                            'source': 'URL',
+                            'excerpt': f'Source: {url}'
+                        })
+                        st.session_state.research_approvals[cid][url] = True
+                        st.success(f"✅ Added 1 URL")
+                    else:
+                        st.info("URL already added")
                     st.rerun()
-        
-        # METHOD 3: AI Agent
-        with col3:
-            st.markdown("**🤖 AI Agent**")
-            
-            if st.button("🔍 Search with AI", key=f"ai_{cid}", use_container_width=True):
-                with st.spinner("🤖 AI Agent searching..."):
-                    try:
-                        from src.ai_responses import search_with_responses_api
-                        
-                        results_found = search_with_responses_api(
-                            artist_name=beneficiary_name,
-                            criterion_id=cid,
-                            criterion_description=desc,
-                            name_variants=st.session_state.beneficiary_variants,
-                            artist_field=st.session_state.artist_field,
-                            max_results=10
-                        )
-                        
-                        if results_found:
-                            # Add to research results
-                            if cid not in st.session_state.research_results:
-                                st.session_state.research_results[cid] = []
-                            if cid not in st.session_state.research_approvals:
-                                st.session_state.research_approvals[cid] = {}
-                            
-                            for item in results_found:
-                                url = item['url']
-                                if not any(r['url'] == url for r in st.session_state.research_results[cid]):
-                                    st.session_state.research_results[cid].append(item)
-                                    st.session_state.research_approvals[cid][url] = True
-                            
-                            st.success(f"✅ AI Agent found {len(results_found)} sources!")
-                            st.rerun()
-                        else:
-                            st.warning("AI Agent found no results")
-                    
-                    except Exception as e:
-                        st.error(f"AI Agent error: {str(e)}")
-                        st.info("💡 Try the Upload or URL methods instead")
         
         # ========================================
         # REVIEW & APPROVE RESULTS
@@ -249,62 +210,6 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
         approved = sum(1 for ok in st.session_state.research_approvals[cid].values() if ok)
         rejected = sum(1 for ok in st.session_state.research_approvals[cid].values() if not ok)
         st.write(f"**✅ Approved: {approved}** | **❌ Rejected: {rejected}**")
-        
-        # Regenerate option
-        st.divider()
-        st.markdown("### 🔄 Not satisfied?")
-        
-        feedback_text = st.text_area(
-            "Tell AI what to improve",
-            placeholder="e.g., 'Need more from major publications'",
-            key=f"feedback_{cid}",
-            height=60
-        )
-        
-        if st.button("🔄 Regenerate with AI", key=f"regen_{cid}"):
-            with st.spinner("Regenerating..."):
-                try:
-                    from src.ai_responses import search_with_responses_api
-                    
-                    # Get approved/rejected URLs
-                    approved_urls = [url for url, ok in st.session_state.research_approvals[cid].items() if ok]
-                    rejected_urls = [url for url, ok in st.session_state.research_approvals[cid].items() if not ok]
-                    
-                    # Build feedback message
-                    feedback_msg = feedback_text or ""
-                    
-                    if rejected_urls:
-                        feedback_msg += f"\n\nAvoid sources like these (rejected):\n"
-                        for url in rejected_urls[:3]:  # Show first 3 as examples
-                            feedback_msg += f"- {url}\n"
-                    
-                    new_results = search_with_responses_api(
-                        artist_name=beneficiary_name,
-                        criterion_id=cid,
-                        criterion_description=desc,
-                        name_variants=st.session_state.beneficiary_variants,
-                        artist_field=st.session_state.artist_field,
-                        feedback=feedback_msg,
-                        max_results=10
-                    )
-                    
-                    if new_results:
-                        # Keep approved, add new
-                        kept = [r for r in results if st.session_state.research_approvals[cid].get(r['url'], False)]
-                        kept_urls = {r['url'] for r in kept}
-                        new_items = [r for r in new_results if r['url'] not in kept_urls]
-                        
-                        st.session_state.research_results[cid] = kept + new_items
-                        
-                        # Auto-approve new
-                        for item in new_items:
-                            st.session_state.research_approvals[cid][item['url']] = True
-                        
-                        st.success(f"✅ Found {len(new_items)} new sources!")
-                        st.rerun()
-                
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
 
 
 def render_research_summary():
@@ -348,7 +253,7 @@ def render_research_summary():
 def convert_approved_to_pdfs():
     """Convert all approved sources to PDFs"""
     
-    from src.web_to_pdf import batch_convert_urls_to_pdfs
+    from src.web_to_pdf import batch_convert_urls_to_pdfs, reconstruct_pdf_to_standard_format
     
     # Separate uploads from URLs
     for cid, results in st.session_state.research_results.items():
@@ -382,18 +287,25 @@ def convert_approved_to_pdfs():
             
             # Check if upload
             if url.startswith('upload://'):
-                # Already have PDF bytes
                 pdf_bytes = item['pdf_bytes']
-                st.session_state.criterion_pdfs[cid][filename] = pdf_bytes
                 
-                # If skip highlighting, mark it in highlight_results (bypasses AI analysis)
                 if should_skip:
+                    # Keep original PDF as-is when skip highlighting is ticked
+                    st.session_state.criterion_pdfs[cid][filename] = pdf_bytes
                     st.session_state.highlight_results[cid][filename] = {
                         'quotes': {},
                         'notes': 'Document marked to skip highlighting - included as-is',
                         'pdf_bytes': pdf_bytes,
                         'skip_highlighting': True
                     }
+                else:
+                    # Reconstruct to match URL-converted format (same margins, footer, layout)
+                    try:
+                        pdf_bytes = reconstruct_pdf_to_standard_format(pdf_bytes, filename)
+                    except Exception as e:
+                        st.error(f"Error reconstructing {filename}: {str(e)}")
+                        pdf_bytes = item['pdf_bytes']  # Fallback to original
+                    st.session_state.criterion_pdfs[cid][filename] = pdf_bytes
             else:
                 # URL to convert - ALL URLs need to be converted to PDF
                 urls_to_convert.append({
