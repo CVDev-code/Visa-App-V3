@@ -726,6 +726,38 @@ def _extract_image_caption(img) -> Optional[str]:
     return caption
 
 
+def reconstruct_pdf_to_standard_format(pdf_bytes: bytes, filename: str) -> bytes:
+    """
+    Reconstruct an uploaded PDF into the same format as URL-converted documents.
+    Extracts text, builds webpage_data dict, and produces a PDF with consistent
+    margins, footer, and layout.
+    
+    Args:
+        pdf_bytes: Original PDF as bytes
+        filename: Original filename (used for title and display)
+        
+    Returns:
+        Reconstructed PDF bytes in standard format
+    """
+    from src.pdf_text import extract_text_from_pdf_bytes
+    
+    content = extract_text_from_pdf_bytes(pdf_bytes) or ""
+    title = os.path.splitext(filename)[0] if filename else "Uploaded document"
+    
+    webpage_data = {
+        "title": title,
+        "author": "",
+        "date": "",
+        "content": content,
+        "url": f"uploaded://{os.path.splitext(filename)[0] if filename else 'document'}",
+        "publication_logo": None,
+        "footer_logo": None,
+        "font_family": "Arial, Helvetica, sans-serif",
+    }
+    
+    return convert_webpage_to_pdf_with_margins(webpage_data)
+
+
 def convert_webpage_to_pdf_with_margins(
     webpage_data: Dict[str, str],
     left_margin_mm: float = 35,
