@@ -82,12 +82,12 @@ st.divider()
 
 # Create tabs
 tab1, tab2 = st.tabs([
-    "🔍 Research & Gather Evidence",
+    "📄 Document upload",
     "✨ Highlight & Export"
 ])
 
 # ============================================================
-# TAB 1: RESEARCH & GATHER EVIDENCE
+# TAB 1: DOCUMENT UPLOAD
 # ============================================================
 with tab1:
     from src.research_tab import render_research_tab
