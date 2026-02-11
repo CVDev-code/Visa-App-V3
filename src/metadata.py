@@ -121,7 +121,14 @@ Return JSON with keys:
 
 Guidelines:
 - source_url: a URL visible in the document (prefer the publication URL).
-- performance_date: the date of the performance/event (as written in the document).
+- performance_date: the date of the performance or event (as written in the document).
+  CRITICAL: EXCLUDE the following - they are NOT performance dates:
+  - "Retrieved:" dates (when the document was accessed/printed)
+  - "Printed:" or "Document accessed:" dates
+  - PDF creation/modification timestamps
+  - Footer timestamps (e.g. "02/11/2026, 14:30" in bottom margin)
+  - Any date that indicates when the document was downloaded, converted, or printed
+  Only extract dates that clearly refer to when a performance, concert, event, or publication occurred.
 - venue_name: venue / hall / festival / organisation hosting the performance.
 - ensemble_name: orchestra/ensemble/choir/company performing (if stated).
 
@@ -176,9 +183,18 @@ def autodetect_metadata(
         if m:
             url = m.group(1).strip().rstrip(".,);]")
 
+    # Reject performance_date if it appears to be a Retrieved/Printed timestamp
+    perf_date = s("performance_date")
+    if perf_date:
+        # Pattern: MM/DD/YYYY, HH:MM (typical PDF conversion footer)
+        retrieved_pattern = re.compile(r"Retrieved:\s*" + re.escape(perf_date), re.IGNORECASE)
+        printed_pattern = re.compile(r"Printed:\s*" + re.escape(perf_date), re.IGNORECASE)
+        if retrieved_pattern.search(text) or printed_pattern.search(text):
+            perf_date = ""
+
     return {
         "source_url": url or "",
         "venue_name": s("venue_name"),
         "ensemble_name": s("ensemble_name"),
-        "performance_date": s("performance_date"),
+        "performance_date": perf_date,
     }
