@@ -19,7 +19,21 @@ Hard rules:
 - Prefer phrases 5–30 words. Avoid duplicates/near-duplicates.
 - If the beneficiary name appears in the document, prefer quotes that include the name or clearly refer to the beneficiary.
 - If a quote supports multiple criteria, you may place it under multiple criteria.
+- When extracting quotes, prefer phrases that explicitly name the venue, date, role, or achievement. Avoid generic praise without specific details.
 """
+
+# Criterion-specific extraction guidance (what to look for in documents)
+CRITERION_EXTRACTION_GUIDANCE = {
+    "1": "Award issuer (direct source), award name, winner vs nominee status, significance of award; ensemble credits if award was for group.",
+    "2_past": "Performance date, venue/organization, work performed (opera/symphony), role (conductor/music director), critical review quality, distinguished reputation language.",
+    "2_future": "Performance date, venue/organization, work performed, role, primary-source announcement, distinguished reputation language.",
+    "3": "Publication credibility, critical acclaim phrases, international/national scope, artist name in review.",
+    "4_past": "Performance date, venue name, ensemble name, role, primary-source announcement vs directory.",
+    "4_future": "Performance date, venue name, ensemble name, role, primary-source announcement.",
+    "5": "Star ratings (4/5, 5 stars), 'sold out', chart positions, recording reviews, broadcast credits, Grammy/ICMA nominations, box office evidence.",
+    "6": "Expert/organization name, expert's authority, relationship to beneficiary, recognition statement.",
+    "7": "Salary/contract amounts, fee data, industry benchmarks.",
+}
 
 USER_PROMPT_TEMPLATE = """
 Beneficiary:
@@ -28,6 +42,9 @@ Beneficiary:
 
 You will extract quote candidates ONLY for the selected O-1 criteria IDs:
 {selected_criteria_block}
+
+CRITERION-SPECIFIC EXTRACTION (prioritize quotes that include these):
+{criterion_extraction_guidance}
 
 Steer with feedback examples (optional):
 - APPROVED EXAMPLES (good style): {approved_examples}
