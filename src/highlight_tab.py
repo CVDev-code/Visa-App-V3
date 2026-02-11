@@ -25,8 +25,8 @@ def render_highlight_tab():
         st.info("""
         📂 **No PDFs yet!**
         
-        Go to **Research & Gather Evidence** tab to:
-        1. Gather sources (upload, URL, or AI)
+        Go to **Document upload** tab to:
+        1. Upload documents and paste URLs
         2. Approve sources
         3. Convert to PDFs
         """)
