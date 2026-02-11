@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 
 from openai import OpenAI
 
-from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE, CRITERIA
+from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE, CRITERIA, CRITERION_EXTRACTION_GUIDANCE
 
 
 def _get_secret(name: str):
@@ -52,6 +52,14 @@ def suggest_ovisa_quotes(
         selected_lines.append(f"- ({cid}) {desc}")
     selected_criteria_block = "\n".join(selected_lines) if selected_lines else "None"
 
+    # Build criterion-specific extraction guidance for selected criteria
+    guidance_lines = []
+    for cid in selected_criteria_ids:
+        gu = CRITERION_EXTRACTION_GUIDANCE.get(cid, "")
+        if gu:
+            guidance_lines.append(f"- ({cid}): {gu}")
+    criterion_extraction_guidance = "\n".join(guidance_lines) if guidance_lines else "Prioritize quotes with specific names, dates, venues, roles, or achievements."
+
     approved = (feedback or {}).get("approved_examples", [])
     rejected = (feedback or {}).get("rejected_examples", [])
 
@@ -62,6 +70,7 @@ def suggest_ovisa_quotes(
         beneficiary_name=beneficiary_name.strip(),
         beneficiary_variants=", ".join([v.strip() for v in beneficiary_variants if v.strip()]) or "None",
         selected_criteria_block=selected_criteria_block,
+        criterion_extraction_guidance=criterion_extraction_guidance,
         approved_examples="\n".join(approved) if approved else "None",
         rejected_examples="\n".join(rejected) if rejected else "None",
         user_feedback=user_feedback_block,
